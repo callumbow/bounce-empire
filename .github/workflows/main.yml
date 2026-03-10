@@ -1,0 +1,21 @@
+name: Publish to GitHub Pages
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Pygbag
+        run: |
+          python -m pip install pygbag
+      - name: Build Game
+        run: |
+          python -m pygbag --build $GITHUB_WORKSPACE/main.py
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: build/web
+          branch: gh-pages
