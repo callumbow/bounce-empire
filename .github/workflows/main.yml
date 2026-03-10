@@ -13,7 +13,7 @@ jobs:
           python -m pip install pygbag
       - name: Build Game
         run: |
-          python -m pygbag --build $GITHUB_WORKSPACE/main.py
+          python -m pygbag --build $GITHUB_WORKSPACE
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         with:
