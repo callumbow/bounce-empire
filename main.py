@@ -213,6 +213,8 @@ def _deserialise_game(raw):
 
 def save_game(slot):
     """Save to localStorage (web) or file (desktop). Returns True on success."""
+    if cheat_mode or free_shop:
+        return False   # codes 1234 / 1111 — saves disabled
     try:
         raw = _serialise_game()
         if _is_web():
@@ -3992,53 +3994,76 @@ def draw_menu(mx, my):
         screen.blit(font.render("\U0001f4a6 GOON MODE ON \U0001f4a6", True, (100,255,150)), (14, HEIGHT-65))
 
     # Slot picker overlay (shown after PLAY is clicked)
-    slot_rects = []
-    panel_rect = None
+    slot_rects  = []
+    del_rects   = []   # delete/overwrite buttons for filled slots
+    panel_rect  = None
+    no_save_mode = cheat_mode or free_shop   # codes 1234 / 1111 block saves
+
     if _show_slot_picker:
         ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         ov.fill((0, 0, 0, 185))
         screen.blit(ov, (0, 0))
 
-        pw, ph = 580, 318
+        pw, ph = 610, 318
         panel_rect = pygame.Rect(WIDTH//2 - pw//2, HEIGHT//2 - ph//2, pw, ph)
         pygame.draw.rect(screen, (18, 22, 28), panel_rect, border_radius=18)
-        pygame.draw.rect(screen, (60, 200, 80), panel_rect, 2, border_radius=18)
+        bdr_col = (180, 80, 80) if no_save_mode else (60, 200, 80)
+        pygame.draw.rect(screen, bdr_col, panel_rect, 2, border_radius=18)
 
-        hdr = big_font.render("SELECT SAVE SLOT", True, WHITE)
+        hdr_text = "SELECT SAVE SLOT"
+        if no_save_mode:
+            hdr_text = "SELECT SAVE SLOT  [NO SAVES IN DEV/FREE MODE]"
+        hdr = font.render(hdr_text, True, (220, 120, 120) if no_save_mode else WHITE)
         screen.blit(hdr, hdr.get_rect(center=(WIDTH//2, panel_rect.y + 30)))
         pygame.draw.line(screen, (40,70,44),
-                         (panel_rect.x+20, panel_rect.y+54),
-                         (panel_rect.right-20, panel_rect.y+54), 1)
+                         (panel_rect.x+20, panel_rect.y+50),
+                         (panel_rect.right-20, panel_rect.y+50), 1)
 
-        bw = pw - 40; bh = 60
+        bh = 60; del_w = 36
+        bw = pw - 40 - del_w - 6   # main slot button width (leaves room for del btn)
+
         for s in range(NUM_SAVE_SLOTS):
             info = slot_info(s)
-            rect = pygame.Rect(panel_rect.x + 20, panel_rect.y + 64 + s*(bh+10), bw, bh)
+            ry = panel_rect.y + 60 + s*(bh+10)
+
+            # Main slot rect (narrower when delete btn shown)
+            main_w = bw if info else pw - 40
+            rect = pygame.Rect(panel_rect.x + 20, ry, main_w, bh)
             slot_rects.append(rect)
             hov2 = rect.collidepoint(mx, my)
 
             if info:
                 bg  = (42, 88, 138) if hov2 else (20, 52, 90)
-                bdr = (100, 175, 255)
+                rb  = (100, 175, 255)
             else:
                 bg  = (28, 105, 38) if hov2 else (14, 66, 20)
-                bdr = (55, 205, 75)
+                rb  = (55, 205, 75)
 
             pygame.draw.rect(screen, bg,  rect, border_radius=10)
-            pygame.draw.rect(screen, bdr, rect, 2, border_radius=10)
-            pygame.draw.rect(screen, bdr, (rect.x, rect.y+7, 4, rect.h-14), border_radius=2)
+            pygame.draw.rect(screen, rb,  rect, 2, border_radius=10)
+            pygame.draw.rect(screen, rb,  (rect.x, rect.y+7, 4, rect.h-14), border_radius=2)
 
             if info:
                 lbl2 = font.render(info, True, (210, 235, 255))
                 screen.blit(lbl2, lbl2.get_rect(midleft=(rect.x+14, rect.centery)))
+
+                # Delete / overwrite button
+                drect = pygame.Rect(rect.right + 6, ry + (bh - del_w)//2, del_w, del_w)
+                del_rects.append((s, drect))
+                dhov = drect.collidepoint(mx, my)
+                pygame.draw.rect(screen, (160, 40, 40) if dhov else (100, 25, 25), drect, border_radius=8)
+                pygame.draw.rect(screen, (220, 80, 80), drect, 2, border_radius=8)
+                x_surf = font.render("\u2715", True, (255, 180, 180))
+                screen.blit(x_surf, x_surf.get_rect(center=drect.center))
             else:
+                del_rects.append((s, None))
                 lbl2 = med_font.render(f"NEW GAME  —  Slot {s+1}", True, (150, 255, 165))
                 screen.blit(lbl2, lbl2.get_rect(center=rect.center))
 
         back = font.render("ESC or click outside to cancel", True, (70,75,80))
         screen.blit(back, back.get_rect(center=(WIDTH//2, panel_rect.bottom + 16)))
 
-    return play_rect, code_btn, slot_rects, panel_rect
+    return play_rect, code_btn, slot_rects, del_rects, panel_rect, no_save_mode
 
 
 def draw_code_screen():
@@ -4551,7 +4576,12 @@ async def new_world_cinematic(screen, clock, W, H, font):
     ESC returns to game.
     """
     global green_coins, selected_index, _nw_all_goons, _nw_bo_vx, _nw_bo_vy, _nw_bo_r, _nw_bo_col
-    PHASE_DUR = [3200, 3500, 2800, 4000, 2600]
+    # ── Cinematic timing ─────────────────────────────────────────────────────
+    # Phase 0: zoom-out / depart game world   (unchanged)
+    # Phase 1: hyperspace → collapses to single point → darkness
+    # Phase 2: pulsar discovered from nothing (NEW - replaces old p2+p3)
+    # Phase 3: enter bathroom world           (was p4)
+    PHASE_DUR = [3200, 4200, 5500, 2600]
 
     ra = _nw_rng(42); rb = _nw_rng(99); rc = _nw_rng(17)
     stars   = _nw_stars(280, ra, W, H)
@@ -4568,14 +4598,24 @@ async def new_world_cinematic(screen, clock, W, H, font):
         for step in range(10):
             f = 1 - step/10
             r2 = max(1,int(rx*f)); r3 = max(1,int(ry*f))
-            a = int(n["al"]*255*(1-f)*4)
+            a  = int(n["al"]*255*(1-f)*4)
             pygame.draw.ellipse(ns,(col.r,col.g,col.b,min(255,a)),(rx-r2,ry-r3,r2*2,r3*2))
         neb_surfs.append((ns, int(n["x"]-rx), int(n["y"]-ry)))
 
     phase = 0; phase_ms = 0; global_ms = 0; in_bath = False
     GBW = int(W*(600/900)) if W >= 900 else W*2//3
-    PL = ["ZOOM OUT","HYPERSPACE","ZOOM IN","PULSAR","ENTERING","BATHROOM WORLD"]
-    PC = [(136,170,255),(255,204,68),(170,221,255),(255,255,255),(136,255,204),(200,232,168)]
+
+    # Pre-compute pulsar jet angles (two opposing polar jets)
+    JET_ANGLES = [math.pi*0.5, math.pi*1.5]   # up + down
+    # Accretion disc particles: [angle, radius, speed, brightness, size]
+    disc_particles = [
+        [_nw_rng(7+i)()*math.pi*2,
+         60 + _nw_rng(11+i)()*120,
+         0.3 + _nw_rng(13+i)()*0.8,
+         0.4 + _nw_rng(17+i)()*0.6,
+         1 + _nw_rng(19+i)()*2]
+        for i in range(200)
+    ]
 
     def draw_stars(surf, bm=1.0, tt=0.0):
         for st in stars:
@@ -4585,26 +4625,29 @@ async def new_world_cinematic(screen, clock, W, H, font):
 
     def draw_hud(surf):
         if in_bath: return
+        labels = ["DEPART","HYPERSPACE","PULSAR","NEW WORLD"]
+        colors = [(136,170,255),(255,204,68),(160,220,255),(136,255,204)]
         x0 = 10
-        for i,(l,pc) in enumerate(zip(PL[:6],PC[:6])):
-            active = (i == min(phase,5))
+        for i,(l,pc) in enumerate(zip(labels,colors)):
+            active = (i == min(phase,3))
             col = pc if active else (48,56,64)
-            pygame.draw.rect(surf,col,(x0,H-28,94,22),1,border_radius=4)
+            pygame.draw.rect(surf,col,(x0,H-28,110,22),1,border_radius=4)
             if active:
-                bg_s = pygame.Surface((94,22),pygame.SRCALPHA)
-                pygame.draw.rect(bg_s, (*col,40), (0,0,94,22), border_radius=4)
+                bg_s = pygame.Surface((110,22),pygame.SRCALPHA)
+                pygame.draw.rect(bg_s,(*col,40),(0,0,110,22),border_radius=4)
                 surf.blit(bg_s,(x0,H-28))
-            ls=font.render(l,True,col); surf.blit(ls,ls.get_rect(center=(x0+47,H-17)))
-            x0 += 100
+            ls=font.render(l,True,col); surf.blit(ls,ls.get_rect(center=(x0+55,H-17)))
+            x0 += 116
 
+    # ── Phase 0: zoom out from game world ────────────────────────────────
     def p0(surf, pt, gt):
         prog = pt/PHASE_DUR[0]
-        fp = _nw_clamp(pt/400,0,1)
-        fv = 1.0 if fp<0.5 else _nw_ease_out((1-fp)*2)
-        sf = _nw_ease_in(prog)
+        fp   = _nw_clamp(pt/400,0,1)
+        fv   = 1.0 if fp<0.5 else _nw_ease_out((1-fp)*2)
+        sf   = _nw_ease_in(prog)
         surf.fill((5,6,15))
-        for ns2,bx,by in neb_surfs:
-            tmp=ns2.copy(); tmp.set_alpha(int(sf*180)); surf.blit(tmp,(bx,by))
+        for ns2,bx2,by2 in neb_surfs:
+            tmp=ns2.copy(); tmp.set_alpha(int(sf*180)); surf.blit(tmp,(bx2,by2))
         draw_stars(surf, sf*(0.7+0.3*math.sin(gt/1000)), gt/1000)
         shrink = 1 - _nw_ease_io(prog)*0.88
         bw=int(GBW*shrink); bh=int(H*shrink)
@@ -4620,99 +4663,207 @@ async def new_world_cinematic(screen, clock, W, H, font):
         if fv>0.01:
             fl=pygame.Surface((W,H)); fl.fill((255,255,255)); fl.set_alpha(int(fv*255)); surf.blit(fl,(0,0))
 
+    # ── Phase 1: hyperspace tunnel → collapses to a point → pure black ───
     def p1(surf, pt, gt):
-        prog = pt/PHASE_DUR[1]
-        surf.fill((2,3,10))
-        sp = 0.3+_nw_ease_in(prog)*0.7
-        bl = int(18+sp*280)
-        for st in streaks:
-            sx=int(W//2+math.cos(st["angle"])*st["dist"]*W*0.5)
-            sy=int(H//2+math.sin(st["angle"])*st["dist"]*H*0.5)
-            ex=int(sx+math.cos(st["angle"])*bl*st["speed"])
-            ey=int(sy+math.sin(st["angle"])*bl*st["speed"])
-            pygame.draw.line(surf,st["color"],(sx,sy),(ex,ey),max(1,int(0.8+sp)))
-        da=_nw_ease_in(prog); dr=int(8+prog*60)
-        for r in range(dr*3,0,-4):
-            a=int(da*(1-r/(dr*3))*100)
-            if a>0: pygame.draw.circle(surf,(200,220,255),(W//2,H//2),r,min(r,max(1,4)))
-        la=int(math.sin(prog*math.pi)*200)
-        if la>0:
-            l=font.render("HYPERSPACE ENGAGED",True,(160,180,255)); l.set_alpha(la)
-            surf.blit(l,l.get_rect(center=(W//2,int(H*0.88))))
+        prog  = pt / PHASE_DUR[1]
+        # First 60%: tunnel accelerates and compresses toward centre
+        # Last 40%: streaks snap to a point, bloom flash, then black
+        t1    = gt / 1000.0
 
+        surf.fill((2, 3, 10))
+
+        if prog < 0.72:
+            # Tunnel phase: streaks accelerate and get shorter as they converge
+            drive = _nw_ease_in(prog / 0.72)
+            sp    = 0.15 + drive * 1.4          # speed multiplier
+            for st in streaks:
+                dist  = st["dist"] * (1.0 - drive * 0.55)   # streaks crowd inward
+                sx    = int(W//2 + math.cos(st["angle"]) * dist * W * 0.5)
+                sy    = int(H//2 + math.sin(st["angle"]) * dist * H * 0.5)
+                length= max(2, int((22 + sp * 260) * st["speed"] * (1 - drive*0.4)))
+                ex    = int(sx + math.cos(st["angle"]) * length)
+                ey    = int(sy + math.sin(st["angle"]) * length)
+                # colour shifts blue → white as speed increases
+                rv    = int(160 + 95 * drive)
+                gv    = int(170 + 85 * drive)
+                bv    = 255
+                pygame.draw.line(surf, (rv, gv, bv), (sx, sy), (ex, ey),
+                                 max(1, int(0.6 + drive * 1.6)))
+            # Central gathering glow
+            gr = int(drive * 55)
+            for r in range(gr, 0, -3):
+                a = int((1 - r/max(1,gr)) * 180 * drive)
+                if a > 0:
+                    pygame.draw.circle(surf,(200,215,255),(W//2,H//2),r,min(r,max(1,3)))
+        else:
+            # Collapse phase: everything snaps to centre point, then flash to black
+            cp    = (prog - 0.72) / 0.28          # 0→1
+            ease_cp = _nw_ease_in(cp)
+            # All streaks collapse to a tiny dot
+            for st in streaks:
+                dist  = st["dist"] * max(0, (1 - ease_cp)) * 0.45 * W * 0.5
+                sx    = int(W//2 + math.cos(st["angle"]) * dist)
+                sy    = int(H//2 + math.sin(st["angle"]) * dist)
+                pygame.draw.line(surf,(230,240,255),(W//2,H//2),(sx,sy),
+                                 max(1,int(1.5*(1-ease_cp))))
+            # White implosion flash then snap to black
+            if cp < 0.5:
+                flash_a = int(_nw_ease_in(cp/0.5) * 255)
+                dot_r   = max(2, int(50 * (1-cp/0.5)))
+                # Blinding core
+                for r in range(dot_r, 0, -2):
+                    f = 1 - r/max(1,dot_r)
+                    pygame.draw.circle(surf,(255,255,255),(W//2,H//2),r)
+                fl = pygame.Surface((W,H)); fl.fill((255,255,255))
+                fl.set_alpha(flash_a); surf.blit(fl,(0,0))
+            else:
+                # Snap: pure black, maybe a tiny dying ember
+                ember = (1 - (cp-0.5)/0.5)
+                if ember > 0.01:
+                    er = max(1, int(ember * 6))
+                    pygame.draw.circle(surf,(255,255,255),(W//2,H//2),er)
+
+    # ── Phase 2: pulsar emerges from absolute darkness ────────────────────
+    # Timeline (prog 0→1 over 5.5 s):
+    #   0.00–0.08  absolute black, one pixel flickers
+    #   0.08–0.22  pinprick brightens — star materialises
+    #   0.22–0.40  twin polar jets erupt outward
+    #   0.40–0.65  accretion disc sweeps into existence
+    #   0.65–0.85  full pulsar throbs; disc glows; stars emerge from dark
+    #   0.85–1.00  "NEW WORLD DETECTED" text fades in, scene holds
     def p2(surf, pt, gt):
-        prog = pt/PHASE_DUR[2]
-        surf.fill((2,3,10))
-        for st in stars:
-            zp=1+_nw_ease_in(prog)*8
-            sx=int(W//2+(st["x"]-W//2)*zp); sy=int(H//2+(st["y"]-H//2)*zp)
-            if 0<=sx<W and 0<=sy<H:
-                b=st["br"]*(0.5+prog*0.5)
-                pygame.draw.circle(surf,(int(255*b),int(255*b),int(255*b)),
-                                   (sx,sy),max(1,int(st["r"]*(1+prog))))
-        pa=_nw_ease_out(prog); pr=int(prog*80)
-        for r in range(pr+50,0,-5):
-            a=int(pa*(1-r/(pr+50))*200)
-            rc=int(180+(255-180)*(1-r/(pr+50)))
-            if a>0: pygame.draw.circle(surf,(rc,min(255,rc+10),255),(W//2,H//2),r,min(r,max(1,5)))
-        if pr>0: pygame.draw.circle(surf,(255,255,255),(W//2,H//2),max(1,int(pr*0.2)))
+        prog = pt / PHASE_DUR[2]
+        t2   = gt / 1000.0
+        CX, CY = W//2, H//2
 
+        surf.fill((0, 0, 0))
+
+        # ── 1. Stars fade in starting at prog=0.55 ───────────────────────
+        star_a = _nw_clamp((prog - 0.55) / 0.3, 0, 1)
+        if star_a > 0:
+            for st in stars:
+                b = st["br"] * star_a * 0.5
+                c = int(255 * b)
+                if c > 2:
+                    pygame.draw.circle(surf,(c,c,int(c*0.9)),(int(st["x"]),int(st["y"])),
+                                       max(1,int(st["r"])))
+
+        # ── 2. Pulsar core ───────────────────────────────────────────────
+        # How "revealed" the core is: starts at prog=0.08
+        core_prog = _nw_clamp((prog - 0.08) / 0.14, 0, 1)
+        # Steady throb once revealed
+        throb     = 0.85 + 0.15 * math.sin(t2 * 9.5)
+        core_str  = _nw_ease_out(core_prog) * throb
+
+        if core_str > 0.01:
+            # Outer halo (large, dim, cyan-blue)
+            max_halo = int(W * 0.18)
+            for r in range(max_halo, 0, -8):
+                f = 1 - r / max_halo
+                a = int(core_str * f * f * 90)
+                if a > 0:
+                    pygame.draw.circle(surf,(int(80*f),int(140*f),255),(CX,CY),r,min(r,max(1,6)))
+            # Mid corona (blue-white)
+            mid_r = int(core_str * 42)
+            for r in range(mid_r, 0, -3):
+                f = 1 - r / max(1, mid_r)
+                rv= int(140 + 115*f); gv= int(180 + 75*f)
+                pygame.draw.circle(surf,(rv,gv,255),(CX,CY),max(1,r),min(max(1,r),max(1,3)))
+            # Bright core pinprick
+            core_r = max(2, int(core_str * (7 + 3*math.sin(t2*14))))
+            pygame.draw.circle(surf,(255,255,255),(CX,CY),core_r)
+            # Hot lens flare spikes (4 axes)
+            spike_len = int(core_str * 55 * throb)
+            for ang in [0, math.pi/2, math.pi, math.pi*1.5]:
+                for w in [3,1]:
+                    col_s = (255,255,255) if w==1 else (100,180,255)
+                    ex2 = int(CX + math.cos(ang)*spike_len)
+                    ey2 = int(CY + math.sin(ang)*spike_len)
+                    if w <= spike_len:
+                        pygame.draw.line(surf, col_s, (CX,CY),(ex2,ey2), w)
+
+        # ── 3. Polar jets ────────────────────────────────────────────────
+        jet_prog = _nw_clamp((prog - 0.22) / 0.18, 0, 1)
+        if jet_prog > 0:
+            jet_ease  = _nw_ease_out(jet_prog)
+            jet_len   = int(jet_ease * H * 0.46)
+            jet_pulse  = 0.7 + 0.3 * math.sin(t2 * 7.2)
+            for ja in JET_ANGLES:
+                # Multiple layered beams per jet
+                for layer, (width, alpha_mul, col_jet) in enumerate([
+                    (12, 0.18, (40, 120, 255)),
+                    (6,  0.35, (100, 180, 255)),
+                    (3,  0.65, (180, 220, 255)),
+                    (1,  1.0,  (255, 255, 255)),
+                ]):
+                    a_jet = int(jet_ease * alpha_mul * jet_pulse * 255)
+                    if a_jet < 2: continue
+                    tip_x = int(CX + math.cos(ja) * jet_len)
+                    tip_y = int(CY + math.sin(ja) * jet_len)
+                    js = pygame.Surface((W, H), pygame.SRCALPHA)
+                    pygame.draw.line(js, (*col_jet, a_jet),(CX,CY),(tip_x,tip_y), width)
+                    surf.blit(js,(0,0))
+                # Jet tip flare
+                if jet_len > 20:
+                    tip_x = int(CX + math.cos(ja) * jet_len)
+                    tip_y = int(CY + math.sin(ja) * jet_len)
+                    for r in range(14, 0, -2):
+                        f = 1 - r/14
+                        a2 = int(jet_ease * f * f * 160 * jet_pulse)
+                        if a2 > 0:
+                            pygame.draw.circle(surf,(int(150+105*f),int(200+55*f),255),
+                                               (tip_x,tip_y),r,min(r,max(1,2)))
+
+        # ── 4. Accretion disc ────────────────────────────────────────────
+        disc_prog = _nw_clamp((prog - 0.40) / 0.25, 0, 1)
+        if disc_prog > 0:
+            disc_ease = _nw_ease_out(disc_prog)
+            disc_spin = t2 * 0.55
+            for dp in disc_particles:
+                angle_d, base_r, spd, bright, sz = dp
+                # Disc is squashed ellipse (edge-on tilt)
+                a_spin   = angle_d + disc_spin * spd
+                rx_d     = base_r * disc_ease
+                ry_d     = rx_d * 0.22        # thin disc
+                px_d     = int(CX + math.cos(a_spin) * rx_d)
+                py_d     = int(CY + math.sin(a_spin) * ry_d)
+                dist_frac= base_r / 180.0
+                heat     = 1 - _nw_clamp(dist_frac, 0, 1)
+                r_c      = int((200 + 55*heat) * bright * disc_ease)
+                g_c      = int((100 + 80*heat) * bright * disc_ease * 0.7)
+                b_c      = int(255 * bright * disc_ease * (0.5 + 0.5*heat))
+                r_c      = min(255, r_c); g_c = min(255, g_c); b_c = min(255, b_c)
+                pr_d     = max(1, int(sz * disc_ease))
+                pygame.draw.circle(surf,(r_c,g_c,b_c),(px_d,py_d),pr_d)
+
+        # ── 5. Text reveal ───────────────────────────────────────────────
+        txt_prog = _nw_clamp((prog - 0.85) / 0.12, 0, 1)
+        if txt_prog > 0.02:
+            fn_mono = pygame.font.SysFont("Courier New", 15, bold=True)
+            lines_txt = ["ANOMALOUS SIGNAL DETECTED", "PULSAR CLASS: MAGNETAR",
+                         "DESIGNATION: NW-001"]
+            for li, ln_txt in enumerate(lines_txt):
+                char_count = max(0, int(txt_prog * len(ln_txt)))
+                partial    = ln_txt[:char_count]
+                if not partial: continue
+                alpha_t    = int(min(1, txt_prog * 3) * 180)
+                ts         = fn_mono.render(partial, True, (80, 160, 200))
+                ts.set_alpha(alpha_t)
+                surf.blit(ts, ts.get_rect(center=(CX, CY + 160 + li * 22)))
+
+    # ── Phase 3: reveal bathroom world (was p4) ───────────────────────────
     def p3(surf, pt, gt):
-        prog=pt/PHASE_DUR[3]; t3=gt/1000.0
+        prog = _nw_ease_io(pt/PHASE_DUR[3]); t3 = gt/1000.0
         surf.fill((2,3,10))
-        draw_stars(surf,0.35)
-        for ri in range(5):
-            rp=(prog*2+ri/5)%1; rr=int(rp*W*0.65); ra=int((1-rp)*100)
-            if rr>0 and ra>0:
-                _w=max(1,int(2+rp*4)); pygame.draw.circle(surf,(200,230,255),(W//2,H//2),rr,min(rr,_w))
-        ba=t3*1.4
-        for bi in range(12):
-            a=ba+bi*math.pi*2/12
-            bl=int(260+30*math.sin(t3*2.5+bi))
-            ex=int(W//2+math.cos(a)*bl); ey=int(H//2+math.sin(a)*bl)
-            br=0.6+0.35*math.sin(t3*3+bi*0.7)
-            pygame.draw.line(surf,(int(255*br*0.9),int(210*br*0.7),255),
-                             (W//2,H//2),(ex,ey),max(1,int(2.5+math.sin(t3+bi))))
-        cr=int(28+8*math.sin(t3*4))
-        for r in range(cr*3,0,-3):
-            f=1-r/(cr*3)
-            pygame.draw.circle(surf,(int(100+155*f),int(160+95*f),255),(W//2,H//2),max(1,r),min(max(1,r),max(1,3)))
-        pygame.draw.circle(surf,(255,255,255),(W//2,H//2),max(1,int(cr*0.35)))
-        ba2=_nw_ease_out(max(0,(prog-0.4)*1.67))
-        if ba2>0.01:
-            bw,bh=260,160; bx,by=W//2-130,H//2-40
-            bs=pygame.Surface((bw,bh),pygame.SRCALPHA)
-            bs.fill((10,20,60,int(ba2*220))); surf.blit(bs,(bx,by))
-            pygame.draw.rect(surf,(int(160*ba2),int(220*ba2),255),(bx,by,bw,bh),2,border_radius=10)
-            fn2=pygame.font.SysFont("Courier New",22,bold=True)
-            t2=fn2.render("NEW WORLD",True,(int(160*ba2),int(216*ba2),255))
-            t2b=font.render("DIMENSIONAL RIFT LOCATED",True,(int(80*ba2),int(144*ba2),int(184*ba2)))
-            t2c=font.render("ENTERING...",True,(int(80*ba2),int(144*ba2),int(184*ba2)))
-            surf.blit(t2,t2.get_rect(center=(W//2,by+52)))
-            surf.blit(t2b,t2b.get_rect(center=(W//2,by+84)))
-            surf.blit(t2c,t2c.get_rect(center=(W//2,by+106)))
-
-    def p4(surf, pt, gt):
-        prog=_nw_ease_io(pt/PHASE_DUR[4]); t4=gt/1000.0
-        surf.fill((2,3,10))
-        if prog<0.5:
+        if prog < 0.5:
             for st in stars:
                 b=st["br"]*(1-prog*2)*0.5
                 if b>0:
                     pygame.draw.circle(surf,(int(255*b),int(255*b),int(255*b)),
                                        (int(st["x"]),int(st["y"])),max(1,int(st["r"])))
-        sc=0.3+prog*0.8; bw=int(W*sc*0.58); bh=int(H*sc*0.58)
-        bx=W//2-bw//2; by=H//2-bh//2
-        if prog<0.85 and bw>4 and bh>4:
-            bs=pygame.Surface((bw,bh),pygame.SRCALPHA)
-            bs.fill((8,18,50,int((0.9-prog*0.9)*220))); surf.blit(bs,(bx,by))
-            pygame.draw.rect(surf,(int(100*(1-prog)),int(200*(1-prog)),255),(bx,by,bw,bh),2,border_radius=10)
-            fn2=pygame.font.SysFont("Courier New",max(10,int(16+prog*10)),bold=True)
-            t2=fn2.render("NEW WORLD",True,(int(160*(1-prog)),int(220*(1-prog)),255))
-            surf.blit(t2,t2.get_rect(center=(W//2,H//2)))
         if prog>0.5:
             ba=(prog-0.5)*2
-            bath=pygame.Surface((W,H)); _nw_draw_bathroom(bath,W,H,t4)
+            bath=pygame.Surface((W,H)); _nw_draw_bathroom(bath,W,H,t3)
             cr=max(1,int((1-prog)*W*0.6+W*prog))
             mask=pygame.Surface((W,H),pygame.SRCALPHA)
             pygame.draw.circle(mask,(255,255,255,int(ba*255)),(W//2,H//2),cr)
@@ -4794,7 +4945,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
             phase_ms += int(dt * 1000)
             if phase_ms >= PHASE_DUR[phase]:
                 phase_ms -= PHASE_DUR[phase]; phase += 1
-                if phase >= 5:
+                if phase >= 4:
                     in_bath = True
 
         if in_bath:
@@ -4833,7 +4984,6 @@ async def new_world_cinematic(screen, clock, W, H, font):
             elif phase==1: p1(screen,phase_ms,gt)
             elif phase==2: p2(screen,phase_ms,gt)
             elif phase==3: p3(screen,phase_ms,gt)
-            elif phase==4: p4(screen,phase_ms,gt)
             draw_hud(screen)
 
         pygame.display.flip()
@@ -4856,7 +5006,7 @@ async def main():
 
         # ========== MENU ==========
         if state == STATE_MENU:
-            play_rect, code_btn, slot_rects, panel_rect = draw_menu(mx, my)
+            play_rect, code_btn, slot_rects, del_rects, panel_rect, no_save_mode = draw_menu(mx, my)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     if state == STATE_GAME and _current_save_slot is not None:
@@ -4872,19 +5022,30 @@ async def main():
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     ex, ey = event.pos
                     if _show_slot_picker:
-                        hit_slot = False
-                        for s, rect in enumerate(slot_rects):
-                            if rect.collidepoint(ex, ey):
-                                if slot_info(s):
-                                    load_game_slot(s)
-                                else:
-                                    reset_game()
-                                _current_save_slot = s
-                                _show_slot_picker  = False
-                                state = STATE_GAME
-                                hit_slot = True
+                        hit = False
+                        # Check delete buttons first
+                        for s, drect in del_rects:
+                            if drect and drect.collidepoint(ex, ey):
+                                delete_save(s)
+                                hit = True
                                 break
-                        if not hit_slot:
+                        if not hit:
+                            for s, rect in enumerate(slot_rects):
+                                if rect.collidepoint(ex, ey):
+                                    if not no_save_mode:
+                                        if slot_info(s):
+                                            load_game_slot(s)
+                                        else:
+                                            reset_game()
+                                        _current_save_slot = s
+                                    else:
+                                        reset_game()
+                                        _current_save_slot = None
+                                    _show_slot_picker = False
+                                    state = STATE_GAME
+                                    hit = True
+                                    break
+                        if not hit:
                             if panel_rect and not panel_rect.collidepoint(ex, ey):
                                 _show_slot_picker = False
                     else:
@@ -4896,7 +5057,7 @@ async def main():
 
         # ========== CODE ENTRY ==========
         elif state == STATE_CODE:
-            play_rect, code_btn, _, _ = draw_menu(mx, my)
+            play_rect, code_btn, _, _, _, _ = draw_menu(mx, my)
             draw_code_screen()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -9230,62 +9391,76 @@ def _draw_menu_base(mx, my):
     return play_rect, code_btn
 
 
-def _draw_slot_overlay(mx, my):
-    """Dark overlay with 3 save-slot buttons. Returns (slot_rects, panel_rect)."""
-    ov=pygame.Surface((WIDTH,HEIGHT),pygame.SRCALPHA)
-    ov.fill((0,0,0,185))
-    screen.blit(ov,(0,0))
-
-    pw,ph=580,318
-    panel=pygame.Rect(WIDTH//2-pw//2,HEIGHT//2-ph//2,pw,ph)
-    pygame.draw.rect(screen,(18,22,28),panel,border_radius=18)
-    pygame.draw.rect(screen,(60,200,80),panel,2,border_radius=18)
-
-    hdr=big_font.render("SELECT SAVE SLOT",True,WHITE)
-    screen.blit(hdr,hdr.get_rect(center=(WIDTH//2,panel.y+30)))
-    pygame.draw.line(screen,(40,70,44),(panel.x+20,panel.y+54),(panel.right-20,panel.y+54),1)
-
-    slot_rects=[]
-    bw=pw-40; bh=60
-    for s in range(NUM_SAVE_SLOTS):
-        info=slot_info(s)
-        rect=pygame.Rect(panel.x+20, panel.y+64+s*(bh+10), bw, bh)
-        slot_rects.append(rect)
-        hov=rect.collidepoint(mx,my)
-
-        if info:
-            bg=(42,88,138) if hov else (20,52,90)
-            bdr=(100,175,255)
-            icon_col=(100,175,255)
-        else:
-            bg=(28,105,38) if hov else (14,66,20)
-            bdr=(55,205,75)
-            icon_col=(55,205,75)
-
-        pygame.draw.rect(screen,bg,rect,border_radius=10)
-        pygame.draw.rect(screen,bdr,rect,2,border_radius=10)
-        # accent stripe
-        pygame.draw.rect(screen,bdr,(rect.x,rect.y+7,4,rect.h-14),border_radius=2)
-
-        if info:
-            lbl=font.render(info,True,(210,235,255))
-            screen.blit(lbl,lbl.get_rect(midleft=(rect.x+14,rect.centery)))
-        else:
-            lbl=med_font.render(f"NEW GAME  —  Slot {s+1}",True,(150,255,165))
-            screen.blit(lbl,lbl.get_rect(center=rect.center))
-
-    back=font.render("ESC or click outside to cancel",True,(70,75,80))
-    screen.blit(back,back.get_rect(center=(WIDTH//2,panel.bottom+16)))
-    return slot_rects, panel
-
-
 def draw_menu(mx, my):
     play_rect, code_btn = _draw_menu_base(mx, my)
-    slot_rects = []
-    panel_rect = None
+    slot_rects  = []
+    del_rects   = []
+    panel_rect  = None
+    no_save_mode = cheat_mode or free_shop
+
     if _show_slot_picker:
-        slot_rects, panel_rect = _draw_slot_overlay(mx, my)
-    return play_rect, code_btn, slot_rects, panel_rect
+        ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 185))
+        screen.blit(ov, (0, 0))
+
+        pw, ph = 610, 318
+        panel_rect = pygame.Rect(WIDTH//2 - pw//2, HEIGHT//2 - ph//2, pw, ph)
+        pygame.draw.rect(screen, (18, 22, 28), panel_rect, border_radius=18)
+        bdr_col = (180, 80, 80) if no_save_mode else (60, 200, 80)
+        pygame.draw.rect(screen, bdr_col, panel_rect, 2, border_radius=18)
+
+        hdr_text = "SELECT SAVE SLOT"
+        if no_save_mode:
+            hdr_text = "SELECT SAVE SLOT  [NO SAVES IN DEV/FREE MODE]"
+        hdr = font.render(hdr_text, True, (220, 120, 120) if no_save_mode else WHITE)
+        screen.blit(hdr, hdr.get_rect(center=(WIDTH//2, panel_rect.y + 30)))
+        pygame.draw.line(screen, (40,70,44),
+                         (panel_rect.x+20, panel_rect.y+50),
+                         (panel_rect.right-20, panel_rect.y+50), 1)
+
+        bh = 60; del_w = 36
+        bw = pw - 40 - del_w - 6
+
+        for s in range(NUM_SAVE_SLOTS):
+            info = slot_info(s)
+            ry = panel_rect.y + 60 + s*(bh+10)
+
+            main_w = bw if info else pw - 40
+            rect = pygame.Rect(panel_rect.x + 20, ry, main_w, bh)
+            slot_rects.append(rect)
+            hov2 = rect.collidepoint(mx, my)
+
+            if info:
+                bg  = (42, 88, 138) if hov2 else (20, 52, 90)
+                rb  = (100, 175, 255)
+            else:
+                bg  = (28, 105, 38) if hov2 else (14, 66, 20)
+                rb  = (55, 205, 75)
+
+            pygame.draw.rect(screen, bg,  rect, border_radius=10)
+            pygame.draw.rect(screen, rb,  rect, 2, border_radius=10)
+            pygame.draw.rect(screen, rb,  (rect.x, rect.y+7, 4, rect.h-14), border_radius=2)
+
+            if info:
+                lbl2 = font.render(info, True, (210, 235, 255))
+                screen.blit(lbl2, lbl2.get_rect(midleft=(rect.x+14, rect.centery)))
+
+                drect = pygame.Rect(rect.right + 6, ry + (bh - del_w)//2, del_w, del_w)
+                del_rects.append((s, drect))
+                dhov = drect.collidepoint(mx, my)
+                pygame.draw.rect(screen, (160, 40, 40) if dhov else (100, 25, 25), drect, border_radius=8)
+                pygame.draw.rect(screen, (220, 80, 80), drect, 2, border_radius=8)
+                x_surf = font.render("\u2715", True, (255, 180, 180))
+                screen.blit(x_surf, x_surf.get_rect(center=drect.center))
+            else:
+                del_rects.append((s, None))
+                lbl2 = med_font.render(f"NEW GAME  —  Slot {s+1}", True, (150, 255, 165))
+                screen.blit(lbl2, lbl2.get_rect(center=rect.center))
+
+        back = font.render("ESC or click outside to cancel", True, (70,75,80))
+        screen.blit(back, back.get_rect(center=(WIDTH//2, panel_rect.bottom + 16)))
+
+    return play_rect, code_btn, slot_rects, del_rects, panel_rect, no_save_mode
 
 
 def draw_code_screen():
@@ -9336,7 +9511,7 @@ async def main():
 
         # ========== MENU ==========
         if state == STATE_MENU:
-            play_rect, code_btn, slot_rects, panel_rect = draw_menu(mx, my)
+            play_rect, code_btn, slot_rects, del_rects, panel_rect, no_save_mode = draw_menu(mx, my)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     if state == STATE_GAME and _current_save_slot is not None:
@@ -9352,19 +9527,29 @@ async def main():
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     ex, ey = event.pos
                     if _show_slot_picker:
-                        hit_slot = False
-                        for s, rect in enumerate(slot_rects):
-                            if rect.collidepoint(ex, ey):
-                                if slot_info(s):
-                                    load_game_slot(s)
-                                else:
-                                    reset_game()
-                                _current_save_slot = s
-                                _show_slot_picker  = False
-                                state = STATE_GAME
-                                hit_slot = True
+                        hit = False
+                        for s, drect in del_rects:
+                            if drect and drect.collidepoint(ex, ey):
+                                delete_save(s)
+                                hit = True
                                 break
-                        if not hit_slot:
+                        if not hit:
+                            for s, rect in enumerate(slot_rects):
+                                if rect.collidepoint(ex, ey):
+                                    if not no_save_mode:
+                                        if slot_info(s):
+                                            load_game_slot(s)
+                                        else:
+                                            reset_game()
+                                        _current_save_slot = s
+                                    else:
+                                        reset_game()
+                                        _current_save_slot = None
+                                    _show_slot_picker = False
+                                    state = STATE_GAME
+                                    hit = True
+                                    break
+                        if not hit:
                             if panel_rect and not panel_rect.collidepoint(ex, ey):
                                 _show_slot_picker = False
                     else:
@@ -9376,7 +9561,7 @@ async def main():
 
         # ========== CODE ENTRY ==========
         elif state == STATE_CODE:
-            play_rect, code_btn, _, _ = draw_menu(mx, my)
+            play_rect, code_btn, _, _, _, _ = draw_menu(mx, my)
             draw_code_screen()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
