@@ -65,6 +65,215 @@ def save_highscore(score):
     except Exception:
         pass
 
+# ==================== SAVE / LOAD SYSTEM ====================
+# Storage strategy (in priority order):
+#   1. Web / pygbag: window.localStorage  (permanent in browser)
+#   2. Desktop:      JSON file next to script
+# This means saves work for everyone:
+#   - GitHub Pages / itch.io players keep saves in their browser storage
+#   - Desktop players keep saves as .json files
+
+import json as _json
+
+def _is_web():
+    """True when running inside pygbag/browser."""
+    try:
+        import platform
+        return hasattr(platform, "window")
+    except Exception:
+        return False
+
+def _ls_key(slot):
+    return f"bounce_empire_save_{slot}"
+
+def _web_save(slot, data_str):
+    try:
+        import platform
+        platform.window.localStorage.setItem(_ls_key(slot), data_str)
+        return True
+    except Exception:
+        return False
+
+def _web_load(slot):
+    try:
+        import platform
+        val = platform.window.localStorage.getItem(_ls_key(slot))
+        # returns None (JS null) or a string
+        if val is None or val == "null":
+            return None
+        return str(val)
+    except Exception:
+        return None
+
+def _web_delete(slot):
+    try:
+        import platform
+        platform.window.localStorage.removeItem(_ls_key(slot))
+    except Exception:
+        pass
+
+def _file_save(slot, data_str):
+    try:
+        with open(rel_path(f"save_slot_{slot}.json"), "w") as f:
+            f.write(data_str)
+        return True
+    except Exception:
+        return False
+
+def _file_load(slot):
+    try:
+        with open(rel_path(f"save_slot_{slot}.json"), "r") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _serialise_game():
+    """Serialise current game state to a JSON string."""
+    data = {
+        "coins": coins, "green_coins": green_coins,
+        "highscore": highscore, "goon_mode": goon_mode,
+        "cheat_mode": cheat_mode, "bouncers": []
+    }
+    for b in bouncers:
+        data["bouncers"].append({
+            "size": b.size, "x": b.fx, "y": b.fy,
+            "speed_x": b.speed_x, "speed_y": b.speed_y,
+            "color": list(b.color), "selected": b.selected,
+            "shop_data": b.shop_data,
+            "waves_enabled": b.waves_enabled,
+            "laser_enabled": b.laser_enabled, "laser_purchases": b.laser_purchases,
+            "flashing": b.flashing, "flash_purchases": b.flash_purchases,
+            "coin_bonus": b.coin_bonus, "trail_enabled": b.trail_enabled,
+            "implosion_enabled": b.implosion_enabled,
+            "lightning_enabled": b.lightning_enabled, "lightning_purchases": b.lightning_purchases,
+            "illuminate_enabled": b.illuminate_enabled,
+            "gravity_enabled": b.gravity_enabled, "gravity_purchases": b.gravity_purchases,
+            "mode3d_enabled": b.mode3d_enabled,
+            "donut_enabled": b.donut_enabled, "donut_ring_count": b.donut_ring_count,
+            "goon_god_enabled": b.goon_god_enabled, "goon_god_purchases": b.goon_god_purchases,
+        })
+    return _json.dumps(data)
+
+def _deserialise_game(raw):
+    """Load JSON string into global game state. Returns True on success."""
+    global coins, green_coins, highscore, goon_mode, cheat_mode
+    global bouncers, selected_index, _hud_cache, start_coins_override
+    global wave_rings, laser_beams, flash_particles, explosion_particles
+    global click_animations, implosion_effects, drip_particles, lightning_sessions
+    global factories, _factory_income_timer, illuminate_effects
+    global gravity_effects, _gravity_income_timer, mode3d_active, mode3d_effect
+    global _3d_income_timer, shop_scroll_offset, all_goons_mode, free_shop
+    data = _json.loads(raw)
+    coins        = data.get("coins", 0)
+    green_coins  = data.get("green_coins", 0)
+    highscore    = data.get("highscore", 0)
+    goon_mode    = data.get("goon_mode", False)
+    cheat_mode   = data.get("cheat_mode", False)
+    start_coins_override = coins
+    # Clear all transient state
+    wave_rings.clear(); laser_beams.clear(); flash_particles.clear()
+    explosion_particles.clear(); click_animations.clear(); implosion_effects.clear()
+    drip_particles.clear(); lightning_sessions.clear(); factories.clear()
+    illuminate_effects.clear(); gravity_effects.clear()
+    _factory_income_timer=0; _gravity_income_timer=0
+    mode3d_active=False; mode3d_effect=None; _3d_income_timer=0
+    shop_scroll_offset=0.0; all_goons_mode=False; free_shop=False
+    # Rebuild bouncers
+    bouncers = []
+    for bd in data.get("bouncers", []):
+        b = Bouncer(int(bd.get("x",400)), int(bd.get("y",300)))
+        b.size = bd.get("size", 80)
+        b.fx = float(bd.get("x",400)); b.fy = float(bd.get("y",300))
+        b.rect.x=int(b.fx); b.rect.y=int(b.fy)
+        b.rect.width=b.rect.height=b.size
+        b.draw_rect.x=b.rect.x; b.draw_rect.y=b.rect.y
+        b.draw_rect.width=b.draw_rect.height=b.size
+        b.speed_x=float(bd.get("speed_x",240)); b.speed_y=float(bd.get("speed_y",240))
+        b.color=tuple(bd.get("color",[200,200,200]))
+        b.selected=bd.get("selected",False)
+        b.shop_data=bd.get("shop_data", build_shop_data())
+        b.waves_enabled=bd.get("waves_enabled",False)
+        b.laser_enabled=bd.get("laser_enabled",False); b.laser_purchases=bd.get("laser_purchases",0)
+        b.flashing=bd.get("flashing",False); b.flash_purchases=bd.get("flash_purchases",0)
+        b.coin_bonus=bd.get("coin_bonus",0); b.trail_enabled=bd.get("trail_enabled",False)
+        b.implosion_enabled=bd.get("implosion_enabled",False)
+        b.lightning_enabled=bd.get("lightning_enabled",False); b.lightning_purchases=bd.get("lightning_purchases",0)
+        b.illuminate_enabled=bd.get("illuminate_enabled",False)
+        b.gravity_enabled=bd.get("gravity_enabled",False); b.gravity_purchases=bd.get("gravity_purchases",0)
+        b.mode3d_enabled=bd.get("mode3d_enabled",False)
+        b.donut_enabled=bd.get("donut_enabled",False); b.donut_ring_count=bd.get("donut_ring_count",0)
+        b.goon_god_enabled=bd.get("goon_god_enabled",False); b.goon_god_purchases=bd.get("goon_god_purchases",0)
+        bouncers.append(b)
+    if not bouncers:
+        bouncers = [Bouncer(GAME_WIDTH//2, HEIGHT//2)]
+    selected_index = next((i for i,b in enumerate(bouncers) if b.selected), 0)
+    bouncers[selected_index].selected = True
+    _hud_cache.clear()
+    return True
+
+def save_game(slot):
+    """Save to localStorage (web) or file (desktop). Returns True on success."""
+    try:
+        raw = _serialise_game()
+        if _is_web():
+            return _web_save(slot, raw)
+        else:
+            return _file_save(slot, raw)
+    except Exception:
+        return False
+
+def load_game_slot(slot):
+    """Load slot. Returns True on success."""
+    try:
+        if _is_web():
+            raw = _web_load(slot)
+        else:
+            raw = _file_load(slot)
+        if raw is None:
+            return False
+        return _deserialise_game(raw)
+    except Exception:
+        return False
+
+def delete_save(slot):
+    if _is_web():
+        _web_delete(slot)
+    else:
+        try: os.remove(rel_path(f"save_slot_{slot}.json"))
+        except Exception: pass
+
+def slot_info(slot):
+    """Return a display string if save exists, else None."""
+    try:
+        if _is_web():
+            raw = _web_load(slot)
+        else:
+            raw = _file_load(slot)
+        if raw is None:
+            return None
+        data = _json.loads(raw)
+        c  = data.get("coins", 0)
+        gc = data.get("green_coins", 0)
+        nb = len(data.get("bouncers", []))
+        hs = data.get("highscore", 0)
+        mode = " [GOON]" if data.get("goon_mode") else ""
+        # format coins helper (inline, no dependency on fmt_coins which may differ)
+        def _fc(n):
+            if n>=1_000_000_000: return f"\xa3{n/1_000_000_000:.1f}B"
+            if n>=1_000_000:     return f"\xa3{n/1_000_000:.1f}M"
+            if n>=1_000:         return f"\xa3{n/1_000:.1f}K"
+            return f"\xa3{int(n)}"
+        return f"Slot {slot+1}  {_fc(c)}  |  {nb} bouncer{'s' if nb!=1 else ''}  |  G{gc}{mode}"
+    except Exception:
+        return None
+
+# Which save slot is active for the current session
+_current_save_slot = None
+_save_msg          = ""
+_save_msg_timer    = 0
+
+NUM_SAVE_SLOTS = 3
+
 highscore      = 0   # set properly after mode globals exist (see below)
 _hs_dirty      = False
 _hs_save_timer = 0
@@ -84,6 +293,13 @@ goon_mode      = False
 code_input     = ""
 code_message   = ""
 code_msg_timer = 0
+# Save/slot picker globals (defined early so both async main copies can use them)
+_show_slot_picker  = False
+_current_save_slot = None
+_save_msg          = ""
+_save_msg_timer    = 0
+NUM_SAVE_SLOTS     = 3
+
 
 DEV_COINS = 10 ** 18
 
@@ -3722,7 +3938,7 @@ def update_highscore():
         save_highscore(highscore)
         _hs_dirty = False; _hs_save_timer = now
 
-def draw_menu():
+def draw_menu(mx, my):
     screen.fill(DARK_BG)
     for bg in bg_bouncers: bg.update(); bg.draw(screen)
 
@@ -3731,15 +3947,9 @@ def draw_menu():
     draw_drips(screen)
 
     if goon_mode:
-        title_str = "GOON EMPIRE"
-        shadow_col = (0, 40, 0)
-        c1 = (0, 200, 80)
-        c2 = (100, 255, 150)
+        title_str = "GOON EMPIRE"; shadow_col=(0,40,0); c1=(0,200,80); c2=(100,255,150)
     else:
-        title_str = "BOUNCE EMPIRE"
-        shadow_col = (60, 30, 0)
-        c1 = ORANGE
-        c2 = GOLD
+        title_str = "BOUNCE EMPIRE"; shadow_col=(60,30,0); c1=ORANGE; c2=GOLD
 
     shadow = title_font.render(title_str, True, shadow_col)
     screen.blit(shadow, shadow.get_rect(center=(WIDTH//2+4, HEIGHT//2-116)))
@@ -3751,17 +3961,23 @@ def draw_menu():
     hs_surf = med_font.render(f"HIGH SCORE:  \xa3{highscore}", True, GOLD)
     screen.blit(hs_surf, hs_surf.get_rect(center=(WIDTH//2, HEIGHT//2+10)))
 
-    btn_rect = pygame.Rect(0,0,260,70)
-    btn_rect.center = (WIDTH//2, HEIGHT//2+110)
-    mx, my = pygame.mouse.get_pos()
-    hover  = btn_rect.collidepoint(mx, my)
-    pygame.draw.rect(screen, (80,200,80) if hover else (50,150,50), btn_rect, border_radius=16)
-    pygame.draw.rect(screen, GREEN, btn_rect, 3, border_radius=16)
+    # PLAY button
+    play_rect = pygame.Rect(0, 0, 260, 70)
+    play_rect.center = (WIDTH//2, HEIGHT//2+110)
+    hover = play_rect.collidepoint(mx, my)
+    pygame.draw.rect(screen, (80,200,80) if hover else (50,150,50), play_rect, border_radius=16)
+    pygame.draw.rect(screen, GREEN, play_rect, 3, border_radius=16)
     lbl = med_font.render("PLAY", True, BLACK)
-    screen.blit(lbl, lbl.get_rect(center=btn_rect.center))
+    screen.blit(lbl, lbl.get_rect(center=play_rect.center))
 
     hint = font.render("ESC to quit", True, (120,120,120))
     screen.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT-40))
+
+    # Save feedback toast
+    if _save_msg and now_t < _save_msg_timer:
+        ms = med_font.render(_save_msg, True, GOLD)
+        ms.set_alpha(int(min(255, (_save_msg_timer - now_t) / 600 * 255)))
+        screen.blit(ms, ms.get_rect(center=(WIDTH//2, HEIGHT//2+180)))
 
     code_btn = pygame.Rect(WIDTH-104, HEIGHT-50, 90, 36)
     code_hover = code_btn.collidepoint(mx, my)
@@ -3775,7 +3991,55 @@ def draw_menu():
     if goon_mode:
         screen.blit(font.render("\U0001f4a6 GOON MODE ON \U0001f4a6", True, (100,255,150)), (14, HEIGHT-65))
 
-    return btn_rect, code_btn
+    # Slot picker overlay (shown after PLAY is clicked)
+    slot_rects = []
+    panel_rect = None
+    if _show_slot_picker:
+        ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 185))
+        screen.blit(ov, (0, 0))
+
+        pw, ph = 580, 318
+        panel_rect = pygame.Rect(WIDTH//2 - pw//2, HEIGHT//2 - ph//2, pw, ph)
+        pygame.draw.rect(screen, (18, 22, 28), panel_rect, border_radius=18)
+        pygame.draw.rect(screen, (60, 200, 80), panel_rect, 2, border_radius=18)
+
+        hdr = big_font.render("SELECT SAVE SLOT", True, WHITE)
+        screen.blit(hdr, hdr.get_rect(center=(WIDTH//2, panel_rect.y + 30)))
+        pygame.draw.line(screen, (40,70,44),
+                         (panel_rect.x+20, panel_rect.y+54),
+                         (panel_rect.right-20, panel_rect.y+54), 1)
+
+        bw = pw - 40; bh = 60
+        for s in range(NUM_SAVE_SLOTS):
+            info = slot_info(s)
+            rect = pygame.Rect(panel_rect.x + 20, panel_rect.y + 64 + s*(bh+10), bw, bh)
+            slot_rects.append(rect)
+            hov2 = rect.collidepoint(mx, my)
+
+            if info:
+                bg  = (42, 88, 138) if hov2 else (20, 52, 90)
+                bdr = (100, 175, 255)
+            else:
+                bg  = (28, 105, 38) if hov2 else (14, 66, 20)
+                bdr = (55, 205, 75)
+
+            pygame.draw.rect(screen, bg,  rect, border_radius=10)
+            pygame.draw.rect(screen, bdr, rect, 2, border_radius=10)
+            pygame.draw.rect(screen, bdr, (rect.x, rect.y+7, 4, rect.h-14), border_radius=2)
+
+            if info:
+                lbl2 = font.render(info, True, (210, 235, 255))
+                screen.blit(lbl2, lbl2.get_rect(midleft=(rect.x+14, rect.centery)))
+            else:
+                lbl2 = med_font.render(f"NEW GAME  —  Slot {s+1}", True, (150, 255, 165))
+                screen.blit(lbl2, lbl2.get_rect(center=rect.center))
+
+        back = font.render("ESC or click outside to cancel", True, (70,75,80))
+        screen.blit(back, back.get_rect(center=(WIDTH//2, panel_rect.bottom + 16)))
+
+    return play_rect, code_btn, slot_rects, panel_rect
+
 
 def draw_code_screen():
     ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -3799,7 +4063,6 @@ def draw_code_screen():
         screen.blit(msg, msg.get_rect(center=(WIDTH//2, panel.y+170)))
     hint = font.render("ENTER to confirm  \u2022  ESC to go back", True, (100,100,130))
     screen.blit(hint, hint.get_rect(center=(WIDTH//2, panel.y+215)))
-
 
 # ------------------ INIT ------------------
 bouncers            = []
@@ -3852,141 +4115,115 @@ def _nw_streaks(n, rng, W, H):
 
 
 
-# NW bouncer state (persists across draws, updated by cinematic loop)
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW WORLD – bathroom state, bouncer physics, shop, draw
+# ═══════════════════════════════════════════════════════════════════════════
 
-# NW bouncer state - persistent across frames
-_nw_bo_x  = 300.0
-_nw_bo_y  = 200.0
-_nw_bo_vx = 220.0
-_nw_bo_vy = 160.0
-_nw_bo_r  = 32
-_nw_bo_color = (200, 120, 255)   # random colour, changes on bounce
-NW_GAME_W = int(1280 * (600/900))  # mirrors GAME_WIDTH
+# ── Persistent bouncer state ─────────────────────────────────────────────
+_nw_bo_x   = 300.0
+_nw_bo_y   = 220.0
+_nw_bo_vx  = 220.0
+_nw_bo_vy  = 155.0
+_nw_bo_r   = 26
+_nw_bo_col = (140, 100, 220)   # changes on bounce
+NW_GAME_W  = GAME_WIDTH        # exact match – same split as main world
+
+# ── Shop data (mirrors main-world structure) ─────────────────────────────
+NW_SHOP_THEME = {
+    "nw_speed": ((40, 40, 52), (120, 200, 255)),
+    "nw_size":  ((38, 52, 38), (100, 220, 120)),
+}
+NW_SHOP_ITEMS = [
+    {"name": "Speed +5%", "base_price": 5,  "action": "nw_speed"},
+    {"name": "Size  +5%", "base_price": 8,  "action": "nw_size"},
+]
+_nw_shop_bought = {"nw_speed": 0, "nw_size": 0}
+
+# ── all-goons toggle for NW shop ─────────────────────────────────────────
+_nw_all_goons = False
+
+def _nw_shop_price(action):
+    b = _nw_shop_bought[action]
+    base = next(i["base_price"] for i in NW_SHOP_ITEMS if i["action"] == action)
+    return math.ceil(base * (1.25 ** b))
+
+def _nw_shop_item_rects(W, H):
+    """Return [(Rect, item_dict), ...] for click hit-testing."""
+    SP_X = NW_GAME_W;  SP_W = W - NW_GAME_W
+    ROW_H = SHOP_ROW_H;  ROW_G = SHOP_ROW_GAP;  TOP = SHOP_PANEL_TOP
+    out = []
+    for i, item in enumerate(NW_SHOP_ITEMS):
+        ry = int(TOP + i * (ROW_H + ROW_G))
+        out.append((pygame.Rect(SP_X + 10, ry, SP_W - 20, ROW_H), item))
+    return out
+
+def _nw_nav_rects(W):
+    """Arrow/ALL nav rects positioned in NW shop header — mirrors shop_nav_rects."""
+    SP_X = NW_GAME_W;  SP_W = W - NW_GAME_W
+    tab  = pygame.Rect(SP_X + 10, 6, SP_W - 20, 28)
+    left  = pygame.Rect(tab.x + 6,      tab.y + 4, 22, tab.height - 8)
+    right = pygame.Rect(tab.right - 28, tab.y + 4, 22, tab.height - 8)
+    all_b = pygame.Rect(tab.right - 56, tab.y + 4, 26, tab.height - 8)
+    return tab, left, right, all_b
 
 def _nw_update_bouncer(dt, floor_y, W, H):
-    global _nw_bo_x, _nw_bo_y, _nw_bo_vx, _nw_bo_vy, _nw_bo_color
+    """Physics tick – returns (cx, cy, hit_wall)."""
+    global _nw_bo_x, _nw_bo_y, _nw_bo_vx, _nw_bo_vy, _nw_bo_col
     r = _nw_bo_r
     _nw_bo_x += _nw_bo_vx * dt
     _nw_bo_y += _nw_bo_vy * dt
     hit = False
     if _nw_bo_x - r <= 0:
-        _nw_bo_vx = abs(_nw_bo_vx); _nw_bo_x = float(r); hit = True
+        _nw_bo_vx = abs(_nw_bo_vx);  _nw_bo_x = float(r);  hit = True
     if _nw_bo_x + r >= NW_GAME_W:
         _nw_bo_vx = -abs(_nw_bo_vx); _nw_bo_x = float(NW_GAME_W - r); hit = True
     ceil_y = 56
     if _nw_bo_y - r <= ceil_y:
-        _nw_bo_vy = abs(_nw_bo_vy); _nw_bo_y = float(ceil_y + r); hit = True
+        _nw_bo_vy = abs(_nw_bo_vy);  _nw_bo_y = float(ceil_y + r); hit = True
     if _nw_bo_y + r >= floor_y - 2:
         _nw_bo_vy = -abs(_nw_bo_vy); _nw_bo_y = float(floor_y - 2 - r); hit = True
     if hit:
-        _nw_bo_color = (random.randint(80,255), random.randint(80,255), random.randint(80,255))
+        _nw_bo_col = (random.randint(80, 255), random.randint(80, 255), random.randint(80, 255))
     return int(_nw_bo_x), int(_nw_bo_y), hit
 
 
-def _nw_draw_bouncer(surf, cx, cy, r, color):
-    """Draw a bouncer exactly like the main-game 2D bouncer (rounded rect + label)."""
-    sz = r * 2
-    draw_rect = pygame.Rect(cx - r, cy - r, sz, sz)
-    br = min(10, max(1, sz // 2))
-    # trail / body
-    pygame.draw.rect(surf, color, draw_rect, border_radius=br)
-    # top highlight
-    hr, hg, hb = color
-    hi_col = (min(255,hr+80), min(255,hg+80), min(255,hb+80))
-    hi_surf = pygame.Surface((max(1,sz-8), max(1,sz//3)), pygame.SRCALPHA)
-    hi_surf.fill((*hi_col, 60))
-    surf.blit(hi_surf, (cx - r + 4, cy - r + 4))
-    # bottom shadow
-    sh_surf = pygame.Surface((max(1,sz-8), max(1,sz//3-4)), pygame.SRCALPHA)
-    sh_surf.fill((0, 0, 0, 50))
-    surf.blit(sh_surf, (cx - r + 4, cy + r - sz//3))
-    # label
-    if sz >= 24:
-        lbl = pygame.font.SysFont(None, 22).render("BOUNCE", True, (0,0,0))
-        surf.blit(lbl, lbl.get_rect(center=(cx, cy)))
-    # border
-    pygame.draw.rect(surf, (0,0,0,80), draw_rect, 1, border_radius=br)
-
-
-def _nw_draw_shop_icon(surf, act, rect, accent_col, unlocked):
-    """Draw shop icon on a surface (not on screen) — mirrors draw_shop_icon logic."""
-    icon_bg = pygame.Rect(rect.x + 8, rect.y + 8, 40, rect.height - 16)
-    pygame.draw.rect(surf, (20,20,24) if unlocked else (35,35,40), icon_bg, border_radius=8)
-    pygame.draw.rect(surf, accent_col if unlocked else (70,70,76), icon_bg, 1, border_radius=8)
-    cx, cy = icon_bg.centerx, icon_bg.centery
-    ic = accent_col if unlocked else (100,100,110)
-    if act == "nw_speed":
-        pts = [(cx-5,cy-10),(cx+1,cy-3),(cx-2,cy-3),(cx+5,cy+10),(cx-1,cy+2),(cx+2,cy+2)]
-        pygame.draw.polygon(surf, ic, pts)
-    elif act == "nw_size":
-        pygame.draw.rect(surf, ic, (cx-8,cy-8,16,16), 2, border_radius=2)
-    else:
-        pygame.draw.circle(surf, ic, (cx,cy), 8, 2)
-
-
-NW_SHOP_THEME = {
-    "nw_speed": ((40,40,50),  (120,200,255)),
-    "nw_size":  ((40,50,40),  (100,220,120)),
-}
-NW_SHOP_ITEMS = [
-    {"name": "Speed +5%",  "base_price": 5,  "action": "nw_speed"},
-    {"name": "Size  +5%",  "base_price": 8,  "action": "nw_size"},
-]
-_nw_shop_bought = {"nw_speed": 0, "nw_size": 0}
-
-def _nw_shop_price(action):
-    bought = _nw_shop_bought[action]
-    base   = next(i["base_price"] for i in NW_SHOP_ITEMS if i["action"] == action)
-    return math.ceil(base * (1.25 ** bought))
-
-def _nw_shop_item_rects(W, H):
-    """Return list of (pygame.Rect, item_dict) for hit-testing."""
-    SP_X = NW_GAME_W; SP_W = W - NW_GAME_W
-    ROW_H=56; ROW_G=10; TOP=42
-    out = []
-    for i, item in enumerate(NW_SHOP_ITEMS):
-        ry = int(TOP + i*(ROW_H+ROW_G))
-        out.append((pygame.Rect(SP_X+10, ry, SP_W-20, ROW_H), item))
-    return out
-
-
-def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None):
-    """Bathroom world — big toilet on floor, bouncing bouncer, NW shop identical to main shop."""
+def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None, mx=0, my=0):
+    """Draw the bathroom world.  mx/my = mouse pos for hover effects."""
     floor_y = int(H * 0.70)
 
-    # ── Background walls gradient
+    # ── Walls gradient ───────────────────────────────────────────────────
     for sy in range(H):
-        f = sy/H
-        pygame.draw.line(surf,(int(218-f*14),int(222-f*12),int(214-f*10)),(0,sy),(W,sy))
+        f = sy / H
+        pygame.draw.line(surf, (int(218-f*14), int(222-f*12), int(214-f*10)), (0, sy), (W, sy))
 
-    # ── Subway wall tiles
-    TILE_W,TILE_H=60,34
-    for row in range(int((floor_y-52)/TILE_H)+2):
-        for col in range(int(W/TILE_W)+2):
-            ox=(row%2)*(TILE_W//2); tx=col*TILE_W-ox; ty=52+row*TILE_H
+    # ── Subway wall tiles ────────────────────────────────────────────────
+    TIW, TIH = 60, 34
+    for row in range(int((floor_y-52)/TIH)+2):
+        for col in range(int(W/TIW)+2):
+            ox=(row%2)*(TIW//2); tx=col*TIW-ox; ty=52+row*TIH
             shade=(234,236,230) if (row+col)%3!=0 else (226,228,222)
-            pygame.draw.rect(surf,shade,(tx+2,ty+2,TILE_W-4,TILE_H-4),border_radius=2)
-            pygame.draw.rect(surf,(244,246,242),(tx+3,ty+3,TILE_W-6,6))
-            pygame.draw.rect(surf,(178,180,174),(tx+2,ty+2,TILE_W-4,TILE_H-4),1,border_radius=2)
+            pygame.draw.rect(surf, shade, (tx+2,ty+2,TIW-4,TIH-4), border_radius=2)
+            pygame.draw.rect(surf, (244,246,242), (tx+3,ty+3,TIW-6,6))
+            pygame.draw.rect(surf, (178,180,174), (tx+2,ty+2,TIW-4,TIH-4), 1, border_radius=2)
 
-    # ── Floor tiles
-    FTW,FTH=40,20
+    # ── Floor tiles ──────────────────────────────────────────────────────
+    FTW, FTH = 40, 20
     for row in range(int((H-floor_y)/FTH)+3):
         for col in range(int(W/FTW)+3):
             tx=col*FTW+(row%2)*(FTW//2); ty=floor_y+row*FTH
             shade=(150,134,118) if (row+col)%2==0 else (138,124,108)
-            pygame.draw.rect(surf,shade,(tx+1,ty+1,FTW-2,FTH-2))
-            pygame.draw.rect(surf,(168,152,136),(tx+1,ty+1,FTW-2,FTH-2),1)
+            pygame.draw.rect(surf, shade, (tx+1,ty+1,FTW-2,FTH-2))
+            pygame.draw.rect(surf, (168,152,136), (tx+1,ty+1,FTW-2,FTH-2), 1)
     refl=pygame.Surface((W,18),pygame.SRCALPHA)
     pygame.draw.rect(refl,(255,255,255,28),(0,0,W,18)); surf.blit(refl,(0,floor_y))
 
-    # ── Baseboard
+    # ── Baseboard ────────────────────────────────────────────────────────
     for sy in range(floor_y,floor_y+18):
         f=(sy-floor_y)/18
         pygame.draw.line(surf,(int(212-f*28),int(210-f*26),int(202-f*24)),(0,sy),(W,sy))
     pygame.draw.rect(surf,(240,238,232),(0,floor_y+2,W,3))
 
-    # ── Ceiling cornice
+    # ── Ceiling cornice ──────────────────────────────────────────────────
     for cy2 in range(0,52):
         f=cy2/52
         pygame.draw.line(surf,(int(248-f*20),int(248-f*18),int(244-f*16)),(0,cy2),(W,cy2))
@@ -3994,53 +4231,54 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None):
         pygame.draw.arc(surf,(212,210,202),(ci,44,20,12),0,math.pi,2)
     pygame.draw.rect(surf,(202,200,194),(0,50,W,3))
 
-    # ── Window
-    wx,wy,ww,wh=W//2-85,56,170,128
+    # ── Window (centre-top) ──────────────────────────────────────────────
+    wx,wy,ww,wh = int(NW_GAME_W//2-80), 56, 160, 124
     pygame.draw.rect(surf,(162,160,154),(wx-10,wy-10,ww+20,wh+20),border_radius=4)
     pygame.draw.rect(surf,(234,232,226),(wx-6,wy-6,ww+12,wh+12),border_radius=3)
     pygame.draw.rect(surf,(150,148,142),(wx-6,wy-6,ww+12,wh+12),3,border_radius=3)
     for sy in range(wh):
         f=sy/wh
-        pygame.draw.line(surf,(min(255,int(118+f*60)),min(255,int(182+f*38)),min(255,int(228+f*22))),(wx,wy+sy),(wx+ww,wy+sy))
+        pygame.draw.line(surf,(min(255,int(120+f*58)),min(255,int(180+f*40)),min(255,int(228+f*22))),(wx,wy+sy),(wx+ww,wy+sy))
     for cxb,cyb,pts in [
-        (int(wx+18+math.sin(t*0.28)*6),wy+30,[(0,0,18),(14,-4,14),(28,0,16),(44,0,14)]),
-        (int(wx+76+math.sin(t*0.18+1)*4),wy+18,[(0,0,11),(12,-3,9),(22,0,11),(32,0,9)]),
+        (int(wx+16+math.sin(t*0.28)*5), wy+28, [(0,0,17),(14,-4,13),(28,0,15),(42,0,13),(52,2,10)]),
+        (int(wx+70+math.sin(t*0.18+1)*4), wy+18, [(0,0,11),(12,-3,9),(22,0,11),(32,0,9)]),
     ]:
-        for dx,dy,r2 in pts:
-            for dr,da in [(r2+4,55),(r2,200),(r2-3,255)]:
+        for dx,dy,r in pts:
+            for dr,da in [(r+4,55),(r,200),(r-3,255)]:
                 if dr>0:
                     gs=pygame.Surface((dr*2,dr*2),pygame.SRCALPHA)
-                    pygame.draw.circle(gs,(255,255,255,da),(dr,dr),dr); surf.blit(gs,(cxb+dx-dr,cyb+dy-dr))
+                    pygame.draw.circle(gs,(255,255,255,da),(dr,dr),dr)
+                    surf.blit(gs,(cxb+dx-dr,cyb+dy-dr))
     pygame.draw.line(surf,(150,148,142),(wx+ww//2,wy),(wx+ww//2,wy+wh),3)
     pygame.draw.line(surf,(150,148,142),(wx,wy+wh//2),(wx+ww,wy+wh//2),3)
-    pygame.draw.rect(surf,(226,224,218),(wx-8,wy+wh,ww+16,18),border_radius=2)
-    px,py=wx+ww-22,wy+wh+4
-    pygame.draw.polygon(surf,(158,82,42),[(px-10,py+14),(px-7,py+26),(px+7,py+26),(px+10,py+14)])
-    for leaf,(ldx,ldy,lr) in enumerate([(0,-24,12),(-8,-20,10),(8,-20,10),(-4,-32,9)]):
+    pygame.draw.rect(surf,(226,224,218),(wx-8,wy+wh,ww+16,16),border_radius=2)
+    px,py=wx+ww-20,wy+wh+4
+    pygame.draw.polygon(surf,(158,82,42),[(px-10,py+12),(px-7,py+24),(px+7,py+24),(px+10,py+12)])
+    for leaf,(ldx,ldy,lr) in enumerate([(0,-22,11),(-7,-18,9),(7,-18,9),(-3,-30,8)]):
         pygame.draw.ellipse(surf,(72+leaf*7,128+leaf*4,56+leaf*3),(px+ldx-lr//2,py+ldy-lr//2,lr,int(lr*1.4)))
 
-    # ── Ceiling light
-    lx,ly=W//2,18
-    glow_r=int(115+18*math.sin(t*2.2))
+    # ── Ceiling light ────────────────────────────────────────────────────
+    lx,ly=NW_GAME_W//2,18
+    glow_r=int(112+16*math.sin(t*2.2))
     gs=pygame.Surface((glow_r*2,glow_r*2),pygame.SRCALPHA)
     for gr in range(glow_r,0,-6):
-        a=int(28*(1-gr/glow_r)**0.5); pygame.draw.circle(gs,(255,250,220,min(255,a)),(glow_r,glow_r),gr)
+        a=int(26*(1-gr/glow_r)**0.5)
+        pygame.draw.circle(gs,(255,250,220,min(255,a)),(glow_r,glow_r),gr)
     surf.blit(gs,(lx-glow_r,0))
     pygame.draw.line(surf,(180,170,155),(lx,0),(lx,ly+12),3)
-    pygame.draw.ellipse(surf,(200,195,185),(lx-32,ly-8,64,26))
-    pygame.draw.circle(surf,(255,248,200),(lx,ly+8),10)
+    pygame.draw.ellipse(surf,(200,195,185),(lx-30,ly-8,60,26))
+    pygame.draw.circle(surf,(255,248,200),(lx,ly+8),9)
 
-    # ── Shower (left)
-    sx,sy2,sw=38,52,148; sh=floor_y-52+16
+    # ── Shower (left) ────────────────────────────────────────────────────
+    sx,sy2,sw=38,52,146; sh=floor_y-52+14
     glass=pygame.Surface((sw,sh),pygame.SRCALPHA)
     for row in range(int(sh/22)+2):
         for col in range(int(sw/24)+2):
-            tx2,ty2=col*24,row*22
-            shade2=(118,170,208,78) if (row+col)%2==0 else (106,158,198,78)
-            rw2=min(22,sw-tx2-1);rh2=min(20,sh-ty2-1)
+            tx2,ty2=col*24,row*22; rw2=min(22,sw-tx2-1); rh2=min(20,sh-ty2-1)
             if rw2>0 and rh2>0:
+                shade2=(118,170,208,76) if (row+col)%2==0 else (106,158,198,76)
                 pygame.draw.rect(glass,shade2,(tx2+1,ty2+1,rw2,rh2))
-                pygame.draw.rect(glass,(80,128,168,55),(tx2+1,ty2+1,rw2,rh2),1)
+                pygame.draw.rect(glass,(80,128,168,52),(tx2+1,ty2+1,rw2,rh2),1)
     surf.blit(glass,(sx,sy2)); pygame.draw.rect(surf,(88,138,172),(sx,sy2,sw,sh),3)
     tray_y=floor_y-10
     pygame.draw.rect(surf,(178,196,208),(sx,tray_y,sw,sh-(tray_y-sy2)),border_radius=3)
@@ -4049,83 +4287,86 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None):
         pygame.draw.circle(surf,(128,152,168),(sx+10+int(ri*(sw-20)/7),sy2+24),5,2)
     cw2=int(sw*0.45); fold_s=pygame.Surface((cw2,sh-24),pygame.SRCALPHA); fw2=max(1,cw2//7)
     for fi in range(7):
-        c1=(130,60,165,200) if fi%2==0 else (98,30,130,200); c2=(165,95,200,200) if fi%2==0 else (115,48,165,200)
+        c1=(130,60,165,200) if fi%2==0 else (98,30,130,200)
+        c2=(165,95,200,200) if fi%2==0 else (115,48,165,200)
         for px3 in range(fw2):
             ff=px3/max(1,fw2)
             col2=(int(c1[0]+(c2[0]-c1[0])*ff),int(c1[1]+(c2[1]-c1[1])*ff),int(c1[2]+(c2[2]-c1[2])*ff),200)
             pygame.draw.line(fold_s,col2,(fi*fw2+px3,0),(fi*fw2+px3,sh-24))
     surf.blit(fold_s,(sx,sy2+24))
-    hx2,hy2=sx+sw-20,sy2+70
-    pygame.draw.arc(surf,(140,158,172),(hx2-30,sy2+20,22,66),0,math.pi,5)
-    pygame.draw.ellipse(surf,(158,175,188),(hx2-18,hy2,36,18))
+    hx2,hy2=sx+sw-20,sy2+68
+    pygame.draw.ellipse(surf,(158,175,188),(hx2-18,hy2,34,18))
     dp=(t*1.5)%1; rng_d=_nw_rng(7777)
-    for d in range(14):
-        dxv=int(hx2-12+rng_d()*24); dph=(dp+d*0.0714)%1
+    for d in range(12):
+        dxv=int(hx2-10+rng_d()*20); dph=(dp+d*0.083)%1
         if dph<0.88:
-            dys=int(hy2+16+dph*55); a=int((0.8-dph*0.7)*255)
+            dys=int(hy2+14+dph*50); a=int((0.8-dph*0.7)*255)
             ds2=pygame.Surface((5,9),pygame.SRCALPHA)
             pygame.draw.ellipse(ds2,(140,195,225,max(0,a)),(0,0,5,9)); surf.blit(ds2,(dxv-2,dys-4))
 
-    # ── TOILET — big, base on floor_y ───────────────────────────────────
-    TW=160; toi_cx=int(W*0.38)
-    ped_h=38; bowl_h=64; seat_h=82; tank_h=90
+    # ── TOILET — big, seated on floor ───────────────────────────────────
+    TW = 160
+    toi_cx = int(NW_GAME_W * 0.38)
+    ped_h=36; bowl_h=62; seat_h=80; tank_h=86
     ped_bot=floor_y; ped_top=ped_bot-ped_h
-    bowl_cy=ped_top-bowl_h//2+10; seat_bot=bowl_cy+24; seat_cy=seat_bot-seat_h//2
-    tank_bot=seat_cy-seat_h//2-4; tank_top=tank_bot-tank_h
-    # floor shadow
-    shad=pygame.Surface((TW+40,22),pygame.SRCALPHA)
-    pygame.draw.ellipse(shad,(0,0,0,40),(0,0,TW+40,22)); surf.blit(shad,(toi_cx-TW//2-20,floor_y-6))
+    bowl_cy=ped_top-bowl_h//2+8; seat_cy=bowl_cy+20
+    tank_bot=seat_cy-seat_h//2-2; tank_top=tank_bot-tank_h
+
+    # shadow
+    shad=pygame.Surface((TW+38,20),pygame.SRCALPHA)
+    pygame.draw.ellipse(shad,(0,0,0,38),(0,0,TW+38,20)); surf.blit(shad,(toi_cx-TW//2-19,floor_y-5))
     # cistern
-    pygame.draw.rect(surf,(214,226,238),(toi_cx-TW//2-2,tank_top,TW+4,tank_h),border_radius=10)
-    pygame.draw.rect(surf,(230,240,250),(toi_cx-TW//2+6,tank_top+6,TW-8,24),border_radius=6)
-    pygame.draw.rect(surf,(155,178,196),(toi_cx-TW//2-2,tank_top,TW+4,tank_h),2,border_radius=10)
-    pygame.draw.rect(surf,(162,184,200),(toi_cx+TW//2-22,tank_top+28,22,16),border_radius=5)
+    pygame.draw.rect(surf,(214,226,238),(toi_cx-TW//2-2,tank_top,TW+4,tank_h),border_radius=9)
+    pygame.draw.rect(surf,(230,240,250),(toi_cx-TW//2+5,tank_top+5,TW-6,22),border_radius=5)
+    pygame.draw.rect(surf,(155,178,196),(toi_cx-TW//2-2,tank_top,TW+4,tank_h),2,border_radius=9)
+    pygame.draw.rect(surf,(162,184,200),(toi_cx+TW//2-22,tank_top+26,22,14),border_radius=4)
+    wsh_a=int(28+14*math.sin(t*2.0))
+    wsh=pygame.Surface((TW-12,14),pygame.SRCALPHA)
+    pygame.draw.ellipse(wsh,(178,208,234,wsh_a),(0,0,TW-12,14)); surf.blit(wsh,(toi_cx-TW//2+5,tank_top+5))
     # seat
     pygame.draw.ellipse(surf,(208,222,234),(toi_cx-TW//2-8,seat_cy-seat_h//2,TW+16,seat_h))
     pygame.draw.ellipse(surf,(155,178,196),(toi_cx-TW//2-8,seat_cy-seat_h//2,TW+16,seat_h),2)
     for hg in range(2):
-        pygame.draw.circle(surf,(170,194,208),(toi_cx-TW//2+26+hg*(TW-36),seat_cy-seat_h//2+4),8)
+        pygame.draw.circle(surf,(170,194,208),(toi_cx-TW//2+24+hg*(TW-32),seat_cy-seat_h//2+4),7)
     # bowl
     pygame.draw.ellipse(surf,(220,234,244),(toi_cx-TW//2+2,bowl_cy-bowl_h//2,TW-4,bowl_h))
     pygame.draw.ellipse(surf,(196,214,228),(toi_cx-TW//2+14,bowl_cy-bowl_h//2+8,TW-28,bowl_h-16))
     pygame.draw.ellipse(surf,(155,178,196),(toi_cx-TW//2+2,bowl_cy-bowl_h//2,TW-4,bowl_h),2)
     rt=(t*0.85)%1; rs2=pygame.Surface((TW-8,bowl_h-4),pygame.SRCALPHA)
-    rra2=int((0.65-rt*0.5)*255); rrw2=int(52*rt*0.7+14); rrh2=int(rt*10+5)
+    rra2=int((0.65-rt*0.5)*255); rrw2=int(50*rt*0.7+13); rrh2=int(rt*9+5)
     if rrw2>0 and rrh2>0 and rra2>0:
         pygame.draw.ellipse(rs2,(158,204,224,max(0,rra2)),((TW-8)//2-rrw2,(bowl_h-4)//2-rrh2,rrw2*2,rrh2*2),2)
     surf.blit(rs2,(toi_cx-TW//2+2,bowl_cy-bowl_h//2))
-    pygame.draw.ellipse(surf,(190,210,224),(toi_cx-TW//2+22,bowl_cy-18,TW-44,36))
     # pedestal
     pygame.draw.polygon(surf,(204,220,232),
-        [(toi_cx-TW//2+16,ped_top),(toi_cx-TW//2+20,ped_bot),(toi_cx+TW//2-20,ped_bot),(toi_cx+TW//2-16,ped_top)])
+        [(toi_cx-TW//2+15,ped_top),(toi_cx-TW//2+20,ped_bot),(toi_cx+TW//2-20,ped_bot),(toi_cx+TW//2-15,ped_top)])
     pygame.draw.polygon(surf,(155,178,196),
-        [(toi_cx-TW//2+16,ped_top),(toi_cx-TW//2+20,ped_bot),(toi_cx+TW//2-20,ped_bot),(toi_cx+TW//2-16,ped_top)],2)
-    # loo roll + bin
-    lrx2,lry2=toi_cx+TW//2+18,seat_cy
-    pygame.draw.rect(surf,(158,180,192),(lrx2,lry2-6,7,50))
-    pygame.draw.circle(surf,(244,236,220),(lrx2+20,lry2+18),18)
-    pygame.draw.circle(surf,(196,182,150),(lrx2+20,lry2+18),18,2)
-    bix2,biy2=toi_cx+TW//2+18,floor_y-54
-    pygame.draw.polygon(surf,(140,162,172),[(bix2,biy2),(bix2+4,biy2+46),(bix2+32,biy2+46),(bix2+36,biy2)])
-    pygame.draw.rect(surf,(158,180,188),(bix2-3,biy2-8,42,10))
+        [(toi_cx-TW//2+15,ped_top),(toi_cx-TW//2+20,ped_bot),(toi_cx+TW//2-20,ped_bot),(toi_cx+TW//2-15,ped_top)],2)
+    # accessories
+    lrx2,lry2=toi_cx+TW//2+16,seat_cy
+    pygame.draw.rect(surf,(158,180,192),(lrx2,lry2-6,7,48))
+    pygame.draw.circle(surf,(244,236,220),(lrx2+19,lry2+16),17)
+    pygame.draw.circle(surf,(196,182,150),(lrx2+19,lry2+16),17,2)
+    bix2,biy2=toi_cx+TW//2+16,floor_y-52
+    pygame.draw.polygon(surf,(140,162,172),[(bix2,biy2),(bix2+4,biy2+44),(bix2+32,biy2+44),(bix2+36,biy2)])
+    pygame.draw.rect(surf,(158,180,188),(bix2-3,biy2-8,40,9))
 
-    # ── Sink (right area)
-    snx2,sny2=int(W*0.62),floor_y-198
-    pygame.draw.rect(surf,(198,212,224),(snx2+34,sny2+72,24,floor_y-sny2-72),border_radius=4)
-    pygame.draw.rect(surf,(220,234,246),(snx2,sny2,138,72),border_radius=12)
-    pygame.draw.ellipse(surf,(204,220,234),(snx2+14,sny2+28,110,48))
-    pygame.draw.ellipse(surf,(188,208,224),(snx2+22,sny2+36,94,36))
-    pygame.draw.rect(surf,(155,182,202),(snx2,sny2,138,72),2,border_radius=12)
-    cx3,cy3=snx2,sny2+72; ch2=floor_y-sny2-72
-    pygame.draw.rect(surf,(204,220,232),(cx3,cy3,138,ch2),border_radius=4)
-    pygame.draw.rect(surf,(142,172,192),(cx3,cy3,138,ch2),2,border_radius=4)
-    mx2,my2=snx2-4,sny2-128
-    pygame.draw.rect(surf,(220,238,250),(mx2,my2,148,116),border_radius=5)
-    pygame.draw.rect(surf,(130,170,194),(mx2,my2,148,116),3,border_radius=5)
-    sh3=pygame.Surface((148,116),pygame.SRCALPHA)
-    pygame.draw.polygon(sh3,(255,255,255,32),[(12,12),(78,12),(12,66)]); surf.blit(sh3,(mx2,my2))
+    # ── Sink ─────────────────────────────────────────────────────────────
+    snx2=int(NW_GAME_W*0.63); sny2=floor_y-196
+    pygame.draw.rect(surf,(198,212,224),(snx2+34,sny2+70,22,floor_y-sny2-70),border_radius=4)
+    pygame.draw.rect(surf,(220,234,246),(snx2,sny2,136,70),border_radius=12)
+    pygame.draw.ellipse(surf,(204,220,234),(snx2+14,sny2+26,108,46))
+    pygame.draw.rect(surf,(155,182,202),(snx2,sny2,136,70),2,border_radius=12)
+    cx3,cy3=snx2,sny2+70; ch2=floor_y-sny2-70
+    pygame.draw.rect(surf,(204,220,232),(cx3,cy3,136,ch2),border_radius=4)
+    pygame.draw.rect(surf,(142,172,192),(cx3,cy3,136,ch2),2,border_radius=4)
+    mx2b,my2b=snx2-4,sny2-126
+    pygame.draw.rect(surf,(220,238,250),(mx2b,my2b,146,114),border_radius=5)
+    pygame.draw.rect(surf,(130,170,194),(mx2b,my2b,146,114),3,border_radius=5)
+    sh3b=pygame.Surface((146,114),pygame.SRCALPHA)
+    pygame.draw.polygon(sh3b,(255,255,255,30),[(12,12),(76,12),(12,64)]); surf.blit(sh3b,(mx2b,my2b))
 
-    # ── Bouncer trail particles
+    # ── Bouncer trail particles ──────────────────────────────────────────
     if nw_bounce_particles:
         for p in nw_bounce_particles:
             pa=int(p[4]*255)
@@ -4134,39 +4375,92 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None):
                 pygame.draw.circle(ps,(*p[5],pa),(p[2]+1,p[2]+1),p[2])
                 surf.blit(ps,(int(p[0])-p[2]-1,int(p[1])-p[2]-1))
 
-    # ── Bouncer body (exact same style as main-game 2D bouncer)
-    _nw_draw_bouncer(surf, int(_nw_bo_x), int(_nw_bo_y), _nw_bo_r, _nw_bo_color)
+    # ── Bouncer body (identical style to main game 2D bouncer) ──────────
+    bcx=int(_nw_bo_x); bcy=int(_nw_bo_y); br=_nw_bo_r
+    bc=_nw_bo_col
+    sz=br*2; draw_rect=pygame.Rect(bcx-br,bcy-br,sz,sz); brd=min(10,max(1,sz//2))
+    pygame.draw.rect(surf,bc,draw_rect,border_radius=brd)
+    hi_col=(min(255,bc[0]+80),min(255,bc[1]+80),min(255,bc[2]+80))
+    hi_s=pygame.Surface((max(1,sz-8),max(1,sz//3)),pygame.SRCALPHA)
+    hi_s.fill((*hi_col,55)); surf.blit(hi_s,(bcx-br+4,bcy-br+4))
+    sh_s=pygame.Surface((max(1,sz-8),max(1,sz//3-4)),pygame.SRCALPHA)
+    sh_s.fill((0,0,0,48)); surf.blit(sh_s,(bcx-br+4,bcy+br-sz//3))
+    if sz>=22:
+        lbl_s=pygame.font.SysFont(None,22).render("BOUNCE",True,(0,0,0))
+        surf.blit(lbl_s,lbl_s.get_rect(center=(bcx,bcy)))
+    pygame.draw.rect(surf,(0,0,0),draw_rect,1,border_radius=brd)
 
-    # ── Green coin ambient sparkles
+    # ── Ambient green coin sparkles ──────────────────────────────────────
     gc_rng=_nw_rng(int(t*4+1)&0xFFFFFF)
     for gc in range(4):
         gc_x=int(gc_rng()*NW_GAME_W*0.85+NW_GAME_W*0.05); gc_y=int(gc_rng()*floor_y*0.8+floor_y*0.1)
-        gc_pulse=0.5+0.5*math.sin(t*2.2+gc*1.3); gc_a=int(75+55*gc_pulse)
-        gc_s=pygame.Surface((20,20),pygame.SRCALPHA)
-        pygame.draw.circle(gc_s,(60,220,80,gc_a),(10,10),int(6+3*gc_pulse))
-        pygame.draw.circle(gc_s,(160,255,140,min(255,gc_a+80)),(10,10),int(3+gc_pulse),1)
-        surf.blit(gc_s,(gc_x-10,gc_y-10))
+        gc_pulse=0.5+0.5*math.sin(t*2.2+gc*1.3); gc_a=int(72+52*gc_pulse)
+        gc_s2=pygame.Surface((20,20),pygame.SRCALPHA)
+        pygame.draw.circle(gc_s2,(60,220,80,gc_a),(10,10),int(6+3*gc_pulse))
+        pygame.draw.circle(gc_s2,(160,255,140,min(255,gc_a+80)),(10,10),int(3+gc_pulse),1)
+        surf.blit(gc_s2,(gc_x-10,gc_y-10))
 
-    # ── LEFT HUD: green coin counter (mirrors main-game £ display)
-    gc_big_f=pygame.font.SysFont(None,44)
+    # ── LEFT HUD: green coin balance ─────────────────────────────────────
+    # Coin icon
     pygame.draw.circle(surf,(50,200,70),(24,22),12)
     pygame.draw.circle(surf,(120,255,140),(24,22),9,2)
+    gc_big_f=pygame.font.SysFont(None,44)
     gc_surf=gc_big_f.render(fmt_nw_coins(green_coins),True,(80,240,110))
     surf.blit(gc_surf,(42,10))
     gc_lf=pygame.font.SysFont(None,22)
     surf.blit(gc_lf.render("GREEN COINS",True,(60,170,80)),(14,44))
 
-    # ── RIGHT PANEL: shop — IDENTICAL layout/style to main-world shop ───
+    # ── RIGHT PANEL: shop — exact same style as main-world shop ──────────
     SP_X=NW_GAME_W; SP_W=W-NW_GAME_W
-    ROW_H=56; ROW_G=10; TOP=42
+    ROW_H=SHOP_ROW_H; ROW_G=SHOP_ROW_GAP; TOP=SHOP_PANEL_TOP
+
+    # Dark panel background + left separator (same as main)
+    pygame.draw.rect(surf,(28,28,32),(SP_X,0,SP_W,H))
+    pygame.draw.line(surf,(80,60,120),(SP_X,0),(SP_X,H),2)
+
+    # ── Nav bar (arrows + ALL button, mirrors shop_nav_rects) ────────────
+    tab_r,left_r,right_r,all_r = _nw_nav_rects(W)
+    pygame.draw.rect(surf,(24,24,30),tab_r,border_radius=8)
+    pygame.draw.rect(surf,(90,90,110),tab_r,1,border_radius=8)
+
+    hover_left  = left_r.collidepoint(mx,my)
+    hover_right = right_r.collidepoint(mx,my)
+    hover_all   = all_r.collidepoint(mx,my)
+
+    # Left arrow button
+    btn_col=(120,180,120) if hover_left else (70,120,70)
+    pygame.draw.rect(surf,btn_col,left_r,border_radius=6)
+    pygame.draw.rect(surf,(30,50,30),left_r,1,border_radius=6)
+    lc=left_r.center
+    pygame.draw.polygon(surf,(10,20,10),[(lc[0]+4,lc[1]-6),(lc[0]+4,lc[1]+6),(lc[0]-4,lc[1])])
+
+    # Right arrow button
+    btn_col=(120,180,120) if hover_right else (70,120,70)
+    pygame.draw.rect(surf,btn_col,right_r,border_radius=6)
+    pygame.draw.rect(surf,(30,50,30),right_r,1,border_radius=6)
+    rc=right_r.center
+    pygame.draw.polygon(surf,(10,20,10),[(rc[0]-4,rc[1]-6),(rc[0]-4,rc[1]+6),(rc[0]+4,rc[1])])
+
+    # ALL button
+    all_ac=(200,160,20) if _nw_all_goons else ((160,140,60) if hover_all else (80,70,30))
+    all_bc=(255,215,0)  if _nw_all_goons else (120,110,50)
+    pygame.draw.rect(surf,all_ac,all_r,border_radius=5)
+    pygame.draw.rect(surf,all_bc,all_r,1,border_radius=5)
+    all_lbl=pygame.font.SysFont(None,18).render("ALL",True,(255,255,180) if _nw_all_goons else (200,190,140))
+    surf.blit(all_lbl,all_lbl.get_rect(center=all_r.center))
+
+    # Label between arrows
+    if _nw_all_goons and len(bouncers)>1:
+        label=f"ALL {len(bouncers)} BOUNCERS"
+    else:
+        label=f"BOUNCER {selected_index+1}/{max(1,len(bouncers))}"
+    lbl_col=(255,215,0) if _nw_all_goons else (200,200,220)
+    lbl_f=pygame.font.SysFont(None,20)
+    lbl_s=lbl_f.render(label,True,lbl_col)
+    surf.blit(lbl_s,lbl_s.get_rect(center=(tab_r.centerx-12,tab_r.centery)))
+
     shop_t=t
-
-    # Shop header bar (matches main game's shop header)
-    pygame.draw.rect(surf,(20,20,24),(SP_X,0,SP_W,TOP))
-    hdr_f=pygame.font.SysFont(None,28)
-    hdr_s=hdr_f.render("NW UPGRADES",True,(80,230,100))
-    surf.blit(hdr_s,hdr_s.get_rect(center=(SP_X+SP_W//2,TOP//2)))
-
+    # ── Shop item rows ───────────────────────────────────────────────────
     for i,item in enumerate(NW_SHOP_ITEMS):
         act=item["action"]
         theme=NW_SHOP_THEME.get(act,((50,50,50),(200,200,200)))
@@ -4174,42 +4468,68 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None):
         price=_nw_shop_price(act)
         bought=_nw_shop_bought[act]
         can=(green_coins>=price)
+        # in ALL mode tint gold like main shop
+        if _nw_all_goons and len(bouncers)>1 and can:
+            bg=tuple(min(255,int(c*0.7+g*0.3)) for c,g in zip(bg_col,(40,34,5)))
+        elif can:
+            bg=bg_col
+        else:
+            bg=(30,30,34)
 
         ry=int(TOP+i*(ROW_H+ROW_G))
         rect=pygame.Rect(SP_X+10,ry,SP_W-20,ROW_H)
-
-        # background (same as main shop)
-        bg=bg_col if can else (30,30,34)
         pygame.draw.rect(surf,bg,rect,border_radius=7)
 
-        # animated accent border when affordable
         if can:
             ba=int(160+80*math.sin(shop_t*2.0+i*0.7))
-            bc=tuple(min(255,int(c*ba/240)) for c in accent_col)
-            pygame.draw.rect(surf,bc,rect,1,border_radius=7)
+            bc2=tuple(min(255,int(c*ba/240)) for c in accent_col)
+            if _nw_all_goons and len(bouncers)>1:
+                bc2=(min(255,bc2[0]+40),min(255,bc2[1]+30),max(0,bc2[2]-20))
+            pygame.draw.rect(surf,bc2,rect,1,border_radius=7)
         else:
             pygame.draw.rect(surf,(55,55,60),rect,1,border_radius=7)
 
-        # left accent stripe
-        stripe=pygame.Rect(rect.x,rect.y+5,4,rect.height-10)
-        pygame.draw.rect(surf,accent_col if can else (60,60,65),stripe,border_radius=2)
+        # Left accent stripe
+        pygame.draw.rect(surf,accent_col if can else (60,60,65),(rect.x,rect.y+5,4,rect.height-10),border_radius=2)
 
-        # icon
-        _nw_draw_shop_icon(surf,act,rect,accent_col,can)
+        # Icon box (same as draw_shop_icon)
+        icon_bg=pygame.Rect(rect.x+8,rect.y+8,40,rect.height-16)
+        pygame.draw.rect(surf,(20,20,24) if can else (35,35,40),icon_bg,border_radius=8)
+        pygame.draw.rect(surf,accent_col if can else (70,70,76),icon_bg,1,border_radius=8)
+        icx,icy=icon_bg.centerx,icon_bg.centery; ic=accent_col if can else (100,100,110)
+        if act=="nw_speed":
+            pts=[(icx-5,icy-10),(icx+1,icy-3),(icx-2,icy-3),(icx+5,icy+10),(icx-1,icy+2),(icx+2,icy+2)]
+            pygame.draw.polygon(surf,ic,pts)
+        elif act=="nw_size":
+            pygame.draw.rect(surf,ic,(icx-8,icy-8,16,16),2,border_radius=2)
+        else:
+            pygame.draw.circle(surf,ic,(icx,icy),8,2)
 
-        # name text (left)
+        # Item name + bought count
         tc=(230,230,235) if can else (90,90,100)
+        if _nw_all_goons and len(bouncers)>1 and can:
+            tc=(255,240,160)
         name_txt=f"{item['name']} x{bought}"
         ns=pygame.font.SysFont(None,26).render(name_txt,True,tc)
-        surf.blit(ns,(rect.x+56,rect.y+10))
+        surf.blit(ns,(rect.x+56,rect.y+8))
 
-        # price text (right, coloured green/red)
+        # Price — green if can afford, RED if cannot
         pp=fmt_nw_coins(price)
-        pc=(80,255,120) if (cheat_mode or can) else (255,80,80)
-        ps_surf=pygame.font.SysFont(None,24).render(pp,True,pc)
-        surf.blit(ps_surf,(rect.right-ps_surf.get_width()-8,rect.y+30))
+        if cheat_mode:
+            pc2=(80,255,120)
+        elif can:
+            pc2=(80,255,120) if not (_nw_all_goons and len(bouncers)>1) else (255,220,60)
+        else:
+            pc2=(255,60,60)   # RED when can't afford
+        ps_surf=pygame.font.SysFont(None,24).render(pp,True,pc2)
+        surf.blit(ps_surf,(rect.right-ps_surf.get_width()-8,rect.y+ROW_H//2+2))
 
-    # ── NEW WORLD watermark
+        # Description line
+        desc_map={"nw_speed":"Bouncer goes faster","nw_size":"Bouncer grows bigger"}
+        ds=pygame.font.SysFont(None,20).render(desc_map.get(act,""),True,(120,140,130) if can else (65,70,68))
+        surf.blit(ds,(rect.x+56,rect.y+28))
+
+    # ── NEW WORLD watermark ──────────────────────────────────────────────
     la2=int((0.16+0.06*math.sin(t*1.5))*255)
     fn_nw=pygame.font.SysFont("Georgia",54,bold=True)
     lb_nw=fn_nw.render("NEW WORLD",True,(255,255,255))
@@ -4230,7 +4550,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
     async so it yields every frame -- works with pygbag (asyncio event loop).
     ESC returns to game.
     """
-    global green_coins
+    global green_coins, selected_index, _nw_all_goons, _nw_bo_vx, _nw_bo_vy, _nw_bo_r, _nw_bo_col
     PHASE_DUR = [3200, 3500, 2800, 4000, 2600]
 
     ra = _nw_rng(42); rb = _nw_rng(99); rc = _nw_rng(17)
@@ -4402,38 +4722,73 @@ async def new_world_cinematic(screen, clock, W, H, font):
             fa=(prog-0.92)/0.08
             fl=pygame.Surface((W,H)); fl.fill((255,255,255)); fl.set_alpha(int(fa*150)); surf.blit(fl,(0,0))
 
-    # ── Green coin income: 1 per wall bounce ──
-    # (tracked via hit_wall flag in physics update)
-
     # ── Bouncer trail particles: [x, y, r, alpha_f, decay, (r,g,b)] ──
     nw_bounce_particles = []
+    nw_mx = 0; nw_my = 0   # mouse position for shop hover
 
     # ── main async loop ──
     while True:
         dt = min(clock.tick(60), 50) / 1000.0   # seconds
         global_ms += int(dt * 1000)
-        now_ms = pygame.time.get_ticks()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                return
+
+            if event.type == pygame.MOUSEMOTION:
+                nw_mx, nw_my = event.pos
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return
+                if in_bath:
+                    # Arrow keys to switch bouncer (same as main game)
+                    if event.key in (pygame.K_LEFT, pygame.K_RIGHT) and bouncers:
+                        _nw_all_goons = False
+                        n = len(bouncers)
+                        if n > 0:
+                            bouncers[selected_index % n].selected = False
+                            if event.key == pygame.K_LEFT:
+                                selected_index = (selected_index - 1) % n
+                            else:
+                                selected_index = (selected_index + 1) % n
+                            bouncers[selected_index % n].selected = True
+                            bouncers[selected_index % n].sync_shop_data()
+
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and in_bath:
                 mx2, my2 = event.pos
-                shop_items = _nw_shop_item_rects(W, H)
-                for item_rect, item in shop_items:
-                    act = item["action"]
-                    price = _nw_shop_price(act)
-                    if item_rect.collidepoint(mx2, my2) and green_coins >= price:
-                        green_coins -= price
-                        _nw_shop_bought[act] += 1
-                        if act == "nw_speed":
-                            _nw_bo_vx *= 1.05; _nw_bo_vy *= 1.05
-                        elif act == "nw_size":
-                            global _nw_bo_r
-                            _nw_bo_r = min(64, int(_nw_bo_r * 1.05))
-                        break
+                tab_r, left_r, right_r, all_r = _nw_nav_rects(W)
+
+                if left_r.collidepoint(mx2, my2) and bouncers:
+                    _nw_all_goons = False
+                    n = len(bouncers)
+                    bouncers[selected_index % n].selected = False
+                    selected_index = (selected_index - 1) % n
+                    bouncers[selected_index % n].selected = True
+                    bouncers[selected_index % n].sync_shop_data()
+                elif right_r.collidepoint(mx2, my2) and bouncers:
+                    _nw_all_goons = False
+                    n = len(bouncers)
+                    bouncers[selected_index % n].selected = False
+                    selected_index = (selected_index + 1) % n
+                    bouncers[selected_index % n].selected = True
+                    bouncers[selected_index % n].sync_shop_data()
+                elif all_r.collidepoint(mx2, my2):
+                    _nw_all_goons = (not _nw_all_goons) and len(bouncers) > 1
+                else:
+                    shop_items = _nw_shop_item_rects(W, H)
+                    for item_rect, item in shop_items:
+                        act = item["action"]
+                        price = _nw_shop_price(act)
+                        if item_rect.collidepoint(mx2, my2):
+                            if green_coins >= price:
+                                green_coins -= price
+                                _nw_shop_bought[act] += 1
+                                if act == "nw_speed":
+                                    _nw_bo_vx *= 1.05; _nw_bo_vy *= 1.05
+                                elif act == "nw_size":
+                                    _nw_bo_r = min(64, int(_nw_bo_r * 1.05))
+                            break
 
         if not in_bath:
             phase_ms += int(dt * 1000)
@@ -4446,20 +4801,20 @@ async def new_world_cinematic(screen, clock, W, H, font):
             t_bath = global_ms / 1000.0
             floor_y_nw = int(H * 0.70)
 
-            # Physics update — earn 1 green coin per wall hit
+            # Physics — earn 1 green coin per wall bounce
             bo_cx_i, bo_cy_i, hit_wall = _nw_update_bouncer(dt, floor_y_nw, W, H)
             if hit_wall:
                 green_coins += 1
 
-            # Spawn trail + burst particles
-            col_trail = _nw_bo_color
-            nw_bounce_particles.append([float(bo_cx_i), float(bo_cy_i), max(2,_nw_bo_r//3), 0.6, 0.05, col_trail])
+            # Trail + burst particles
+            col_trail = _nw_bo_col
+            nw_bounce_particles.append([float(bo_cx_i), float(bo_cy_i), max(2, _nw_bo_r//3), 0.55, 0.045, col_trail])
             if hit_wall:
                 for _ in range(10):
                     nw_bounce_particles.append([float(bo_cx_i), float(bo_cy_i),
-                        random.randint(4,10), 1.0, random.uniform(0.07,0.14), col_trail])
+                        random.randint(4, 10), 1.0, random.uniform(0.07, 0.14), col_trail])
 
-            # Update + cull particles
+            # Cull dead particles
             i2 = 0
             while i2 < len(nw_bounce_particles):
                 p = nw_bounce_particles[i2]
@@ -4469,7 +4824,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
                 else:
                     i2 += 1
 
-            _nw_draw_bathroom(screen, W, H, t_bath, nw_bounce_particles)
+            _nw_draw_bathroom(screen, W, H, t_bath, nw_bounce_particles, nw_mx, nw_my)
             el = font.render("ESC = Return to Game", True, (90, 140, 100))
             screen.blit(el, (16, H - 28))
         else:
@@ -4490,9 +4845,9 @@ async def main():
     global state, code_input, code_message, code_msg_timer
     global cheat_mode, goon_mode, highscore, coins
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
-    global start_coins_override
-    global free_shop
-    global all_goons_mode
+    global start_coins_override, free_shop, all_goons_mode
+    global _current_save_slot, _save_msg, _save_msg_timer
+    global _show_slot_picker
 
     while True:
         raw_ms = clock.tick(60)
@@ -4501,26 +4856,54 @@ async def main():
 
         # ========== MENU ==========
         if state == STATE_MENU:
-            btn_rect, code_btn = draw_menu()
+            play_rect, code_btn, slot_rects, panel_rect = draw_menu(mx, my)
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE: pygame.quit(); sys.exit()
-                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                        reset_game(); state = STATE_GAME
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    if btn_rect.collidepoint(mx, my):
-                        reset_game(); state = STATE_GAME
-                    elif code_btn.collidepoint(mx, my):
-                        state = STATE_CODE; code_input = ""; code_message = ""
+                    if event.key == pygame.K_ESCAPE:
+                        if _show_slot_picker:
+                            _show_slot_picker = False
+                        else:
+                            pygame.quit(); sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    ex, ey = event.pos
+                    if _show_slot_picker:
+                        hit_slot = False
+                        for s, rect in enumerate(slot_rects):
+                            if rect.collidepoint(ex, ey):
+                                if slot_info(s):
+                                    load_game_slot(s)
+                                else:
+                                    reset_game()
+                                _current_save_slot = s
+                                _show_slot_picker  = False
+                                state = STATE_GAME
+                                hit_slot = True
+                                break
+                        if not hit_slot:
+                            if panel_rect and not panel_rect.collidepoint(ex, ey):
+                                _show_slot_picker = False
+                    else:
+                        if play_rect.collidepoint(ex, ey):
+                            _show_slot_picker = True
+                        elif code_btn.collidepoint(ex, ey):
+                            state = STATE_CODE; code_input = ""; code_message = ""
             pygame.display.flip()
 
         # ========== CODE ENTRY ==========
         elif state == STATE_CODE:
-            btn_rect, code_btn = draw_menu()
+            play_rect, code_btn, _, _ = draw_menu(mx, my)
             draw_code_screen()
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         state = STATE_MENU
@@ -4529,9 +4912,7 @@ async def main():
                     elif event.key == pygame.K_RETURN:
                         if code_input == "1234":
                             cheat_mode = not cheat_mode
-                            if cheat_mode:
-                                start_coins_override = None
-                                free_shop = False
+                            if cheat_mode: start_coins_override = None; free_shop = False
                             code_message = "\u2605 DEV MODE ACTIVATED \u2605" if cheat_mode else "\u2605 DEV MODE DEACTIVATED \u2605"
                             highscore = load_highscore()
                             _hud_cache.clear()
@@ -4539,15 +4920,10 @@ async def main():
                             pygame.display.flip(); pygame.time.wait(1800)
                             state = STATE_MENU; code_input = ""
                         elif code_input == "1111":
-                            cheat_mode = False
-                            goon_mode = False
-                            start_coins_override = None
-                            free_shop = True
-                            coins = 0
-                            for b in bouncers:
-                                b.sync_shop_data()
-                            drip_particles.clear()
-                            _hud_cache.clear()
+                            cheat_mode = False; goon_mode = False
+                            start_coins_override = None; free_shop = True; coins = 0
+                            for b in bouncers: b.sync_shop_data()
+                            drip_particles.clear(); _hud_cache.clear()
                             code_message = "\u2605 NORMAL MODE: FREE SHOP \u2605"
                             highscore = load_highscore()
                             code_msg_timer = pygame.time.get_ticks() + 1800
@@ -4555,26 +4931,22 @@ async def main():
                             state = STATE_MENU; code_input = ""
                         elif code_input == "6969":
                             goon_mode = not goon_mode
-                            start_coins_override = None
-                            free_shop = False
-                            for b in bouncers:
-                                b.sync_shop_data()
-                            drip_particles.clear()
-                            _hud_cache.clear()
+                            start_coins_override = None; free_shop = False
+                            for b in bouncers: b.sync_shop_data()
+                            drip_particles.clear(); _hud_cache.clear()
                             code_message = "\U0001f4a6 GOON MODE ACTIVATED \U0001f4a6" if goon_mode else "\U0001f4a6 GOON MODE DEACTIVATED \U0001f4a6"
                             highscore = load_highscore()
                             code_msg_timer = pygame.time.get_ticks() + 1800
                             pygame.display.flip(); pygame.time.wait(1800)
                             state = STATE_MENU; code_input = ""
                         else:
-                            code_message   = "WRONG CODE"
+                            code_message = "WRONG CODE"
                             code_msg_timer = pygame.time.get_ticks() + 1200
-                            code_input     = ""
+                            code_input = ""
                     elif event.unicode and event.unicode.isprintable() and len(code_input) < 8:
                         code_input += event.unicode
             pygame.display.flip()
 
-        # ========== GAME ==========
         else:
             screen.fill(DARK_BG)
             now_g = pygame.time.get_ticks()
@@ -4586,10 +4958,19 @@ async def main():
             shop_scroll_offset = max(0.0, min(shop_scroll_offset, shop_max_scroll(len(selected_bouncer.shop_data))))
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        update_highscore(); state = STATE_MENU
+                        update_highscore()
+                        if _current_save_slot is not None:
+                            ok = save_game(_current_save_slot)
+                            _save_msg = f"\u2713 Saved to Slot {_current_save_slot+1}" if ok else "Save failed"
+                            _save_msg_timer = pygame.time.get_ticks() + 2500
+                        state = STATE_MENU
 
                 if event.type == pygame.MOUSEWHEEL and mx >= GAME_WIDTH:
                     max_sc = shop_max_scroll(len(selected_bouncer.shop_data))
@@ -8795,208 +9176,117 @@ def update_highscore():
         _hs_dirty = False; _hs_save_timer = now
 
 
-# ==================== SAVE / LOAD SYSTEM ====================
-# Works on desktop (writes .json files next to the script).
-# On web/pygbag file writes silently fail — progress only
-# persists while the tab is open (green coins, etc stay in memory).
+# ── MENU DRAWING ─────────────────────────────────────────────────────────────
+_show_slot_picker = False   # flips True when PLAY is clicked
 
-NUM_SAVE_SLOTS = 3
-
-def _save_path(slot):
-    return rel_path(f"save_slot_{slot}.json")
-
-def save_game(slot):
-    """Persist full game state to slot file. Silent-fail on web."""
-    try:
-        import json as _j
-        data = {
-            "coins":       coins,
-            "green_coins": green_coins,
-            "highscore":   highscore,
-            "goon_mode":   goon_mode,
-            "cheat_mode":  cheat_mode,
-            "bouncers":    []
-        }
-        for b in bouncers:
-            bd = {
-                "size":b.size,"x":b.fx,"y":b.fy,
-                "speed_x":b.speed_x,"speed_y":b.speed_y,
-                "color":list(b.color),"selected":b.selected,
-                "shop_data":b.shop_data,
-                "waves_enabled":b.waves_enabled,
-                "laser_enabled":b.laser_enabled,"laser_purchases":b.laser_purchases,
-                "flashing":b.flashing,"flash_purchases":b.flash_purchases,
-                "coin_bonus":b.coin_bonus,"trail_enabled":b.trail_enabled,
-                "implosion_enabled":b.implosion_enabled,
-                "lightning_enabled":b.lightning_enabled,"lightning_purchases":b.lightning_purchases,
-                "illuminate_enabled":b.illuminate_enabled,
-                "gravity_enabled":b.gravity_enabled,"gravity_purchases":b.gravity_purchases,
-                "mode3d_enabled":b.mode3d_enabled,
-                "donut_enabled":b.donut_enabled,"donut_ring_count":b.donut_ring_count,
-                "goon_god_enabled":b.goon_god_enabled,"goon_god_purchases":b.goon_god_purchases,
-            }
-            data["bouncers"].append(bd)
-        with open(_save_path(slot), "w") as f:
-            _j.dump(data, f)
-        return True
-    except Exception:
-        return False
-
-def load_game_slot(slot):
-    """Load slot into global state. Returns True on success."""
-    global coins, green_coins, highscore, goon_mode, cheat_mode
-    global bouncers, selected_index, _hud_cache, start_coins_override
-    global wave_rings, laser_beams, flash_particles, explosion_particles
-    global click_animations, implosion_effects, drip_particles, lightning_sessions
-    global factories, _factory_income_timer, illuminate_effects
-    global gravity_effects, _gravity_income_timer, mode3d_active, mode3d_effect
-    global _3d_income_timer, shop_scroll_offset, all_goons_mode, free_shop
-    try:
-        import json as _j
-        with open(_save_path(slot), "r") as f:
-            data = _j.load(f)
-        coins        = data.get("coins", 0)
-        green_coins  = data.get("green_coins", 0)
-        highscore    = data.get("highscore", 0)
-        goon_mode    = data.get("goon_mode", False)
-        cheat_mode   = data.get("cheat_mode", False)
-        start_coins_override = coins
-        # Clear effects
-        wave_rings.clear(); laser_beams.clear()
-        flash_particles.clear(); explosion_particles.clear()
-        click_animations.clear(); implosion_effects.clear()
-        drip_particles.clear(); lightning_sessions.clear()
-        factories.clear(); illuminate_effects.clear(); gravity_effects.clear()
-        _factory_income_timer=0; _gravity_income_timer=0
-        mode3d_active=False; mode3d_effect=None; _3d_income_timer=0
-        shop_scroll_offset=0.0; all_goons_mode=False; free_shop=False
-        # Rebuild bouncers
-        bouncers = []
-        for bd in data.get("bouncers", []):
-            b = Bouncer(int(bd.get("x",400)), int(bd.get("y",300)))
-            b.size = bd.get("size", 80)
-            b.fx = float(bd.get("x", 400)); b.fy = float(bd.get("y", 300))
-            b.rect.x=int(b.fx); b.rect.y=int(b.fy)
-            b.rect.width=b.rect.height=b.size
-            b.draw_rect.x=b.rect.x; b.draw_rect.y=b.rect.y
-            b.draw_rect.width=b.draw_rect.height=b.size
-            b.speed_x=float(bd.get("speed_x",240)); b.speed_y=float(bd.get("speed_y",240))
-            b.color=tuple(bd.get("color",[200,200,200]))
-            b.selected=bd.get("selected",False)
-            b.shop_data=bd.get("shop_data", build_shop_data())
-            b.waves_enabled=bd.get("waves_enabled",False)
-            b.laser_enabled=bd.get("laser_enabled",False)
-            b.laser_purchases=bd.get("laser_purchases",0)
-            b.flashing=bd.get("flashing",False)
-            b.flash_purchases=bd.get("flash_purchases",0)
-            b.coin_bonus=bd.get("coin_bonus",0)
-            b.trail_enabled=bd.get("trail_enabled",False)
-            b.implosion_enabled=bd.get("implosion_enabled",False)
-            b.lightning_enabled=bd.get("lightning_enabled",False)
-            b.lightning_purchases=bd.get("lightning_purchases",0)
-            b.illuminate_enabled=bd.get("illuminate_enabled",False)
-            b.gravity_enabled=bd.get("gravity_enabled",False)
-            b.gravity_purchases=bd.get("gravity_purchases",0)
-            b.mode3d_enabled=bd.get("mode3d_enabled",False)
-            b.donut_enabled=bd.get("donut_enabled",False)
-            b.donut_ring_count=bd.get("donut_ring_count",0)
-            b.goon_god_enabled=bd.get("goon_god_enabled",False)
-            b.goon_god_purchases=bd.get("goon_god_purchases",0)
-            bouncers.append(b)
-        if not bouncers:
-            bouncers=[Bouncer(GAME_WIDTH//2, HEIGHT//2)]
-        selected_index=next((i for i,b in enumerate(bouncers) if b.selected),0)
-        bouncers[selected_index].selected=True
-        _hud_cache.clear()
-        return True
-    except Exception:
-        return False
-
-def slot_info(slot):
-    """Return display string for slot, or None if empty/unreadable."""
-    try:
-        import json as _j
-        with open(_save_path(slot), "r") as f:
-            data = _j.load(f)
-        c  = data.get("coins", 0)
-        gc = data.get("green_coins", 0)
-        nb = len(data.get("bouncers", []))
-        mode = " [GOON]" if data.get("goon_mode") else ""
-        return f"Slot {slot+1}  {fmt_coins(c)}  |  {nb} bouncer{'s' if nb!=1 else ''}  |  G{gc}{mode}"
-    except Exception:
-        return None
-
-# track which save slot we're in for in-game autosave
-_current_save_slot = None   # None = new game (no file yet)
-_save_msg          = ""
-_save_msg_timer    = 0
-
-def draw_menu():
-    global _save_msg, _save_msg_timer
+def _draw_menu_base(mx, my):
+    """Title screen with PLAY button. Returns (play_rect, code_btn)."""
     screen.fill(DARK_BG)
     for bg in bg_bouncers: bg.update(); bg.draw(screen)
-
     now_t = pygame.time.get_ticks()
     update_spawn_drips(now_t)
     draw_drips(screen)
 
     if goon_mode:
-        title_str="GOON EMPIRE"; shadow_col=(0,40,0); c1=(0,200,80); c2=(100,255,150)
+        ts="GOON EMPIRE";  sc=(0,40,0); c1=(0,200,80); c2=(100,255,150)
     else:
-        title_str="BOUNCE EMPIRE"; shadow_col=(60,30,0); c1=ORANGE; c2=GOLD
+        ts="BOUNCE EMPIRE"; sc=(60,30,0); c1=ORANGE; c2=GOLD
 
-    shadow=title_font.render(title_str,True,shadow_col)
-    screen.blit(shadow,shadow.get_rect(center=(WIDTH//2+4,HEIGHT//2-116)))
-    t1=title_font.render(title_str,True,c1); t2=title_font.render(title_str,True,c2)
+    sh=title_font.render(ts,True,sc)
+    screen.blit(sh, sh.get_rect(center=(WIDTH//2+4,HEIGHT//2-116)))
+    t1=title_font.render(ts,True,c1); t2=title_font.render(ts,True,c2)
     screen.blit(t1,t1.get_rect(center=(WIDTH//2,HEIGHT//2-120)))
     screen.blit(t2,t2.get_rect(center=(WIDTH//2,HEIGHT//2-122)))
 
-    hs_surf=med_font.render(f"HIGH SCORE:  \xa3{highscore}",True,GOLD)
-    screen.blit(hs_surf,hs_surf.get_rect(center=(WIDTH//2,HEIGHT//2+10)))
+    hs=med_font.render(f"HIGH SCORE:  \xa3{highscore}",True,GOLD)
+    screen.blit(hs,hs.get_rect(center=(WIDTH//2,HEIGHT//2+10)))
 
-    mx,my=pygame.mouse.get_pos()
+    play_rect=pygame.Rect(0,0,260,70)
+    play_rect.center=(WIDTH//2,HEIGHT//2+110)
+    hov=play_rect.collidepoint(mx,my)
+    pygame.draw.rect(screen,(80,200,80) if hov else (50,150,50),play_rect,border_radius=16)
+    pygame.draw.rect(screen,GREEN,play_rect,3,border_radius=16)
+    lbl=med_font.render("PLAY",True,BLACK)
+    screen.blit(lbl,lbl.get_rect(center=play_rect.center))
 
-    # ── 3 save-slot buttons ──────────────────────────────────────────────
-    slot_rects=[]
-    for s in range(NUM_SAVE_SLOTS):
-        info=slot_info(s)
-        bw=520; bh=54
-        bx=WIDTH//2-bw//2
-        by=HEIGHT//2+55+s*(bh+12)
-        rect=pygame.Rect(bx,by,bw,bh)
-        slot_rects.append(rect)
-        hov=rect.collidepoint(mx,my)
-        if info:
-            # filled slot
-            pygame.draw.rect(screen,(35,75,120) if hov else (22,52,85),rect,border_radius=12)
-            pygame.draw.rect(screen,(90,170,255),rect,2,border_radius=12)
-            lbl=font.render(info,True,(200,230,255))
-            screen.blit(lbl,lbl.get_rect(center=rect.center))
-        else:
-            # empty — new game
-            pygame.draw.rect(screen,(55,130,55) if hov else (38,92,38),rect,border_radius=12)
-            pygame.draw.rect(screen,GREEN,rect,2,border_radius=12)
-            lbl=med_font.render(f"NEW GAME  —  Slot {s+1}",True,BLACK)
-            screen.blit(lbl,lbl.get_rect(center=rect.center))
-
-    hint=font.render("Click a slot to play  |  ESC to quit",True,(120,120,120))
+    hint=font.render("ESC to quit",True,(120,120,120))
     screen.blit(hint,(WIDTH//2-hint.get_width()//2,HEIGHT-40))
 
-    # Save message feedback
-    if _save_msg and now_t < _save_msg_timer:
-        ms=font.render(_save_msg,True,GOLD)
-        screen.blit(ms,ms.get_rect(center=(WIDTH//2,HEIGHT//2+42)))
+    if _save_msg and now_t<_save_msg_timer:
+        ms=med_font.render(_save_msg,True,GOLD)
+        ms.set_alpha(int(min(255,(_save_msg_timer-now_t)/600*255)))
+        screen.blit(ms,ms.get_rect(center=(WIDTH//2,HEIGHT//2+180)))
 
     code_btn=pygame.Rect(WIDTH-104,HEIGHT-50,90,36)
     chov=code_btn.collidepoint(mx,my)
     pygame.draw.rect(screen,(80,80,120) if chov else (45,45,70),code_btn,border_radius=8)
     pygame.draw.rect(screen,(100,100,160),code_btn,2,border_radius=8)
-    screen.blit(font.render("CODE",True,(180,180,255)),font.render("CODE",True,(180,180,255)).get_rect(center=code_btn.center))
+    ct=font.render("CODE",True,(180,180,255))
+    screen.blit(ct,ct.get_rect(center=code_btn.center))
 
     if cheat_mode: screen.blit(font.render("\u2605 DEV MODE ON \u2605",True,GOLD),(14,HEIGHT-40))
     if goon_mode:  screen.blit(font.render("\U0001f4a6 GOON MODE ON \U0001f4a6",True,(100,255,150)),(14,HEIGHT-65))
 
-    return slot_rects, code_btn
+    return play_rect, code_btn
+
+
+def _draw_slot_overlay(mx, my):
+    """Dark overlay with 3 save-slot buttons. Returns (slot_rects, panel_rect)."""
+    ov=pygame.Surface((WIDTH,HEIGHT),pygame.SRCALPHA)
+    ov.fill((0,0,0,185))
+    screen.blit(ov,(0,0))
+
+    pw,ph=580,318
+    panel=pygame.Rect(WIDTH//2-pw//2,HEIGHT//2-ph//2,pw,ph)
+    pygame.draw.rect(screen,(18,22,28),panel,border_radius=18)
+    pygame.draw.rect(screen,(60,200,80),panel,2,border_radius=18)
+
+    hdr=big_font.render("SELECT SAVE SLOT",True,WHITE)
+    screen.blit(hdr,hdr.get_rect(center=(WIDTH//2,panel.y+30)))
+    pygame.draw.line(screen,(40,70,44),(panel.x+20,panel.y+54),(panel.right-20,panel.y+54),1)
+
+    slot_rects=[]
+    bw=pw-40; bh=60
+    for s in range(NUM_SAVE_SLOTS):
+        info=slot_info(s)
+        rect=pygame.Rect(panel.x+20, panel.y+64+s*(bh+10), bw, bh)
+        slot_rects.append(rect)
+        hov=rect.collidepoint(mx,my)
+
+        if info:
+            bg=(42,88,138) if hov else (20,52,90)
+            bdr=(100,175,255)
+            icon_col=(100,175,255)
+        else:
+            bg=(28,105,38) if hov else (14,66,20)
+            bdr=(55,205,75)
+            icon_col=(55,205,75)
+
+        pygame.draw.rect(screen,bg,rect,border_radius=10)
+        pygame.draw.rect(screen,bdr,rect,2,border_radius=10)
+        # accent stripe
+        pygame.draw.rect(screen,bdr,(rect.x,rect.y+7,4,rect.h-14),border_radius=2)
+
+        if info:
+            lbl=font.render(info,True,(210,235,255))
+            screen.blit(lbl,lbl.get_rect(midleft=(rect.x+14,rect.centery)))
+        else:
+            lbl=med_font.render(f"NEW GAME  —  Slot {s+1}",True,(150,255,165))
+            screen.blit(lbl,lbl.get_rect(center=rect.center))
+
+    back=font.render("ESC or click outside to cancel",True,(70,75,80))
+    screen.blit(back,back.get_rect(center=(WIDTH//2,panel.bottom+16)))
+    return slot_rects, panel
+
+
+def draw_menu(mx, my):
+    play_rect, code_btn = _draw_menu_base(mx, my)
+    slot_rects = []
+    panel_rect = None
+    if _show_slot_picker:
+        slot_rects, panel_rect = _draw_slot_overlay(mx, my)
+    return play_rect, code_btn, slot_rects, panel_rect
+
 
 def draw_code_screen():
     ov=pygame.Surface((WIDTH,HEIGHT),pygame.SRCALPHA)
@@ -9037,6 +9327,7 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
+    global _show_slot_picker
 
     while True:
         raw_ms = clock.tick(60)
@@ -9045,33 +9336,54 @@ async def main():
 
         # ========== MENU ==========
         if state == STATE_MENU:
-            slot_rects, code_btn = draw_menu()
+            play_rect, code_btn, slot_rects, panel_rect = draw_menu(mx, my)
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE: pygame.quit(); sys.exit()
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    for s, rect in enumerate(slot_rects):
-                        if rect.collidepoint(mx, my):
-                            if slot_info(s):
-                                load_game_slot(s)
+                    if event.key == pygame.K_ESCAPE:
+                        if _show_slot_picker:
+                            _show_slot_picker = False   # close overlay
+                        else:
+                            pygame.quit(); sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    ex, ey = event.pos
+                    if _show_slot_picker:
+                        hit_slot = False
+                        for s, rect in enumerate(slot_rects):
+                            if rect.collidepoint(ex, ey):
+                                if slot_info(s):
+                                    load_game_slot(s)
+                                else:
+                                    reset_game()
                                 _current_save_slot = s
-                            else:
-                                reset_game()
-                                _current_save_slot = s
-                            state = STATE_GAME
-                            break
+                                _show_slot_picker  = False
+                                state = STATE_GAME
+                                hit_slot = True
+                                break
+                        if not hit_slot:
+                            if panel_rect and not panel_rect.collidepoint(ex, ey):
+                                _show_slot_picker = False
                     else:
-                        if code_btn.collidepoint(mx, my):
+                        if play_rect.collidepoint(ex, ey):
+                            _show_slot_picker = True
+                        elif code_btn.collidepoint(ex, ey):
                             state = STATE_CODE; code_input = ""; code_message = ""
             pygame.display.flip()
 
         # ========== CODE ENTRY ==========
         elif state == STATE_CODE:
-            slot_rects, code_btn = draw_menu()
+            play_rect, code_btn, _, _ = draw_menu(mx, my)
             draw_code_screen()
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         state = STATE_MENU
@@ -9112,6 +9424,7 @@ async def main():
                         code_input+=event.unicode
             pygame.display.flip()
 
+
         # ========== GAME ==========
         else:
             screen.fill(DARK_BG)
@@ -9124,7 +9437,11 @@ async def main():
             shop_scroll_offset = max(0.0, min(shop_scroll_offset, shop_max_scroll(len(selected_bouncer.shop_data))))
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+                if event.type == pygame.QUIT:
+                    if state == STATE_GAME and _current_save_slot is not None:
+                        update_highscore()
+                        save_game(_current_save_slot)
+                    pygame.quit(); sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         update_highscore()
