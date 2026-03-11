@@ -76,6 +76,7 @@ STATE_CODE = "code"
 state = STATE_MENU
 
 coins          = 0
+start_coins_override = None
 cheat_mode     = False
 goon_mode      = False
 code_input     = ""
@@ -130,6 +131,12 @@ def shop_max_scroll(item_count):
     viewport_h = HEIGHT - SHOP_PANEL_TOP - SHOP_PANEL_BOTTOM_PAD
     return max(0.0, float(content_h - viewport_h))
 
+def shop_nav_rects():
+    tab = pygame.Rect(GAME_WIDTH + 10, 6, SHOP_WIDTH - 20, 28)
+    left = pygame.Rect(tab.x + 6, tab.y + 4, 22, tab.height - 8)
+    right = pygame.Rect(tab.right - 28, tab.y + 4, 22, tab.height - 8)
+    return tab, left, right
+
 # ------------------ HUD TEXT CACHE ------------------
 _hud_cache: dict = {}
 
@@ -151,7 +158,7 @@ BASE_SHOP = [
     {"name": "Wave Bouncer",       "base_price": 1000,      "action": "wave"},
     {"name": "Laser Bouncer",      "base_price": 15000,     "action": "laser"},
     {"name": "Implosion Bouncer",  "base_price": 250000,    "action": "implosion"},
-    {"name": "Lightning Bouncer",  "base_price": 10000000,  "action": "lightning"},
+    {"name": "Lightning Bouncer",  "base_price": 5000000,  "action": "lightning"},
     {"name": "Goon Factory",        "base_price": 2000000000,"action": "factory"},
     {"name": "Illuminate",            "base_price": 250000000000,"action": "illuminate"},
     {"name": "Gravity Well",           "base_price": 5000000000000,"action": "gravity"},
@@ -170,7 +177,7 @@ GOON_SHOP = [
     {"name": "Goon Wave Goon",       "base_price": 1000,      "action": "wave"},
     {"name": "Goon Laser Goon",      "base_price": 15000,     "action": "laser"},
     {"name": "Goon Implosion Goon",  "base_price": 250000,    "action": "implosion"},
-    {"name": "Goon Lightning Goon",  "base_price": 10000000,  "action": "lightning"},
+    {"name": "Goon Lightning Goon",  "base_price": 5000000,  "action": "lightning"},
     {"name": "Goon Factory Goon",    "base_price": 2000000000,"action": "factory"},
     {"name": "Goon Illuminate Goon",   "base_price": 250000000000,"action": "illuminate"},
     {"name": "Goon Gravity Goon",      "base_price": 5000000000000,"action": "gravity"},
@@ -2722,7 +2729,9 @@ class Mode3DEffect:
 
     def __init__(self):
         self.income_timer = pygame.time.get_ticks()
-        self.half  = min(GAME_WIDTH,HEIGHT)*0.32
+        self._half_base = min(GAME_WIDTH,HEIGHT)*0.44
+        self._half_god  = min(GAME_WIDTH,HEIGHT)*0.32
+        self.half  = self._half_god if total_goon_god_power() > 0 else self._half_base
         self.rx    = 0.18; self.ry = 0.28; self.rz = 0.04
         self.cam_t = 0.0
         self.pulse = 0.0
@@ -2732,6 +2741,12 @@ class Mode3DEffect:
         self._laser3d = []
         self._lightning3d = []
         self._rebuild_world()
+
+    def _sync_half(self):
+        target = self._half_god if total_goon_god_power() > 0 else self._half_base
+        if abs(self.half - target) > 0.01:
+            self.half = target
+            self._rebuild_world()
 
     def _rebuild_world(self):
         self.world_objs.clear()
@@ -2882,6 +2897,7 @@ class Mode3DEffect:
 
     def update(self, dt):
         global coins
+        self._sync_half()
         self.cam_t += dt
         # Keep motion dynamic but never allow upside-down camera flips.
         self.rx = 0.12 + 0.14 * math.sin(self.cam_t * 0.45)
@@ -2973,12 +2989,13 @@ class Mode3DEffect:
             self.income_timer = now
 
     def draw(self, surface):
+        self._sync_half()
         now   = pygame.time.get_ticks()
         t     = now/1000.0
         pulse = 0.5+0.5*math.sin(self.pulse)
         hs    = self.half
         scx   = GAME_WIDTH//2
-        scy   = int(HEIGHT*0.68)
+        scy   = int(HEIGHT*0.68) if total_goon_god_power() > 0 else HEIGHT//2
         rx,ry,rz = self.rx,self.ry,self.rz
 
         surface.fill((4,4,12))
@@ -3223,6 +3240,16 @@ def draw_mode3d_post(surface):
     if mode3d_active and mode3d_effect:
         mode3d_effect.draw(surface)
 
+def select_bouncer(idx):
+    global selected_index
+    if not bouncers:
+        return
+    idx = idx % len(bouncers)
+    bouncers[selected_index].selected = False
+    selected_index = idx
+    bouncers[selected_index].selected = True
+    bouncers[selected_index].sync_shop_data()
+
 # ------------------ BOUNCER ------------------
 class Bouncer:
     __slots__ = ('size','fx','fy','rect','color','speed_x','speed_y','selected',
@@ -3307,6 +3334,9 @@ class Bouncer:
 
     def is_unlocked(self, index):
         if cheat_mode or index == 0: return True
+        action = self.shop_data[index]["action"]
+        if action in ("bonus", "wave"):
+            return self.bought_count("trail") >= 3
         return self.shop_data[index-1]["bought"] >= 3
 
     def _spawn_wave(self, side):
@@ -3523,10 +3553,13 @@ class Bouncer:
 
 # ------------------ HELPERS ------------------
 def reset_game():
-    global coins, bouncers, selected_index, _hud_cache
+    global coins, start_coins_override, bouncers, selected_index, _hud_cache
     global wave_rings, laser_beams, flash_particles, explosion_particles
     global click_animations, implosion_effects, drip_particles, lightning_sessions, factories, _factory_income_timer, illuminate_effects, gravity_effects, _gravity_income_timer, mode3d_active, mode3d_effect, _3d_income_timer, shop_scroll_offset
-    coins = DEV_COINS if cheat_mode else 0
+    if cheat_mode:
+        coins = DEV_COINS
+    else:
+        coins = start_coins_override if start_coins_override is not None else 0
     bouncers = [Bouncer(GAME_WIDTH//2, HEIGHT//2)]
     bouncers[0].selected = True
     selected_index = 0
@@ -3654,6 +3687,7 @@ async def main():
     global state, code_input, code_message, code_msg_timer
     global cheat_mode, goon_mode, highscore, coins
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
+    global start_coins_override
 
     while True:
         raw_ms = clock.tick(60)
@@ -3690,14 +3724,31 @@ async def main():
                     elif event.key == pygame.K_RETURN:
                         if code_input == "1234":
                             cheat_mode = not cheat_mode
+                            if cheat_mode:
+                                start_coins_override = None
                             code_message = "\u2605 DEV MODE ACTIVATED \u2605" if cheat_mode else "\u2605 DEV MODE DEACTIVATED \u2605"
                             highscore = load_highscore()
                             _hud_cache.clear()
                             code_msg_timer = pygame.time.get_ticks() + 1800
                             pygame.display.flip(); pygame.time.wait(1800)
                             state = STATE_MENU; code_input = ""
+                        elif code_input == "1111":
+                            cheat_mode = False
+                            goon_mode = False
+                            start_coins_override = 1_000_000
+                            coins = 1_000_000
+                            for b in bouncers:
+                                b.sync_shop_data()
+                            drip_particles.clear()
+                            _hud_cache.clear()
+                            code_message = "\u2605 NORMAL MODE: \xa31,000,000 \u2605"
+                            highscore = load_highscore()
+                            code_msg_timer = pygame.time.get_ticks() + 1800
+                            pygame.display.flip(); pygame.time.wait(1800)
+                            state = STATE_MENU; code_input = ""
                         elif code_input == "6969":
                             goon_mode = not goon_mode
+                            start_coins_override = None
                             for b in bouncers:
                                 b.sync_shop_data()
                             drip_particles.clear()
@@ -3744,6 +3795,13 @@ async def main():
                             shop_scroll_offset = max(0.0, min(max_sc, shop_scroll_offset + step))
                         continue
                     if event.button != 1:
+                        continue
+                    tab_rect, left_btn, right_btn = shop_nav_rects()
+                    if left_btn.collidepoint(mx, my):
+                        select_bouncer(selected_index - 1)
+                        continue
+                    if right_btn.collidepoint(mx, my):
+                        select_bouncer(selected_index + 1)
                         continue
                     for i, item in enumerate(selected_bouncer.shop_data):
                         row_rect = shop_item_rect(i, shop_scroll_offset)
@@ -3844,8 +3902,7 @@ async def main():
 
                     for i, b in enumerate(bouncers):
                         if b.rect.collidepoint(mx, my):
-                            bouncers[selected_index].selected = False
-                            selected_index = i; b.selected = True
+                            select_bouncer(i)
 
             update_highscore()
             if cheat_mode: coins = DEV_COINS
@@ -3905,10 +3962,32 @@ async def main():
             # Subtle left-edge separator line
             pygame.draw.line(screen, (80, 60, 120), (GAME_WIDTH, 0), (GAME_WIDTH, HEIGHT), 2)
 
-            header_surf = _goon_header_surf if goon_mode else _shop_header_surf
-            # Header with underline accent
-            screen.blit(header_surf, (GAME_WIDTH + 10, 8))
-            pygame.draw.line(screen, (120, 80, 200), (GAME_WIDTH+8, 36), (GAME_WIDTH + SHOP_WIDTH - 8, 36), 1)
+            tab_rect, left_btn, right_btn = shop_nav_rects()
+            pygame.draw.rect(screen, (24, 24, 30), tab_rect, border_radius=8)
+            pygame.draw.rect(screen, (90, 90, 110), tab_rect, 1, border_radius=8)
+
+            hover_left = left_btn.collidepoint(mx, my)
+            hover_right = right_btn.collidepoint(mx, my)
+            btn_col = (120, 180, 120) if hover_left else (70, 120, 70)
+            pygame.draw.rect(screen, btn_col, left_btn, border_radius=6)
+            pygame.draw.rect(screen, (30, 50, 30), left_btn, 1, border_radius=6)
+
+            btn_col = (120, 180, 120) if hover_right else (70, 120, 70)
+            pygame.draw.rect(screen, btn_col, right_btn, border_radius=6)
+            pygame.draw.rect(screen, (30, 50, 30), right_btn, 1, border_radius=6)
+
+            # Arrow glyphs
+            lc = left_btn.center
+            pygame.draw.polygon(screen, (10, 20, 10),
+                                [(lc[0] + 4, lc[1] - 6), (lc[0] + 4, lc[1] + 6), (lc[0] - 4, lc[1])])
+            rc = right_btn.center
+            pygame.draw.polygon(screen, (10, 20, 10),
+                                [(rc[0] - 4, rc[1] - 6), (rc[0] - 4, rc[1] + 6), (rc[0] + 4, rc[1])])
+
+            label_prefix = "GOON" if goon_mode else "BOUNCER"
+            label = f"{label_prefix} {selected_index+1}/{max(1,len(bouncers))}"
+            lbl = font.render(label, True, (200, 200, 220))
+            screen.blit(lbl, lbl.get_rect(center=tab_rect.center))
 
             now = pygame.time.get_ticks()
             shop_t = now / 1000.0
