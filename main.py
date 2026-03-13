@@ -36,12 +36,25 @@ med_font   = pygame.font.SysFont(None, 52)
 
 clock = pygame.time.Clock()
 
-# ------------------ HIGH SCORE ------------------
-_BASE_DIR = os.path.dirname(__file__) or "."
+# ------------------ SAVE DIRECTORY (persistent across updates) ------------------
+def _save_dir():
+    """Returns a persistent OS-level folder so saves survive game file updates."""
+    import platform as _plat
+    sys_name = _plat.system()
+    if sys_name == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif sys_name == "Darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+    d = os.path.join(base, "BounceEmpire")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 def rel_path(*parts):
-    return os.path.join(_BASE_DIR, *parts)
+    return os.path.join(_save_dir(), *parts)
 
+# ------------------ HIGH SCORE ------------------
 HIGHSCORE_FILE_NORMAL = rel_path("highscore.txt")
 HIGHSCORE_FILE_GOON   = rel_path("highscore_goon.txt")
 HIGHSCORE_FILE_DEV    = rel_path("highscore_dev.txt")
@@ -340,6 +353,12 @@ DONUT_INCOME_PER_SEC     = 1_000_000_000_000_000
 # FIX: Laser beams now have a shorter max life to self-clean faster
 LASER_BEAM_DECAY = 0.025               # was 0.012
 
+# ------------------ VISUAL EFFECTS TOGGLE ------------------
+# When False: particles, wave rings, laser beams, flash, drips,
+# implosion glow, illuminate, gravity wells, lightning are skipped.
+# Income / physics still run normally.
+fx_enabled = True   # toggled by the FX button in HUD
+
 # Scrollable shop layout (larger buttons)
 SHOP_ROW_H       = 56
 SHOP_ROW_GAP     = 10
@@ -347,6 +366,12 @@ SHOP_PANEL_TOP   = 42
 SHOP_PANEL_BOTTOM_PAD = 10
 shop_scroll_offset = 0.0
 all_goons_mode = False   # when True, shop shows "upgrade ALL goons at once" tab
+
+# Actions that can be toggled on/off after purchase (visual/effect only, not stat upgrades)
+_TOGGLEABLE_ACTIONS = {"wave","laser","flash","trail","implosion","lightning",
+                       "illuminate","gravity","mode3d","donut","goongod","factory"}
+TOGGLE_BTN_W = 36
+TOGGLE_BTN_H = 20
 
 def shop_item_rect(i, scroll_off=0.0):
     y = int(SHOP_PANEL_TOP + i * (SHOP_ROW_H + SHOP_ROW_GAP) - scroll_off)
@@ -456,7 +481,8 @@ def build_shop_data(existing=None):
             "price": old["price"] if old else it["base_price"],
             "base_price": it["base_price"],
             "action": it["action"],
-            "bought": old["bought"] if old else 0
+            "bought": old["bought"] if old else 0,
+            "disabled": old.get("disabled", False) if old else False,
         })
     return rows
 
@@ -482,6 +508,7 @@ def update_spawn_drips(now):
 
 def draw_drips(surface):
     if not goon_mode: return
+    if not fx_enabled: return
     i = 0
     while i < len(drip_particles):
         d = drip_particles[i]
@@ -519,6 +546,7 @@ _EXP_COLORS = [(255,80,0),(255,160,0),(255,220,0),(255,40,40),(255,0,0)]
 _TWO_PI     = 2.0 * math.pi
 
 def spawn_flash_particles(cx, cy, color):
+    if not fx_enabled: return
     free_slots = MAX_FLASH_PARTICLES - len(flash_particles)
     if free_slots <= 0:
         return
@@ -533,6 +561,7 @@ def spawn_flash_particles(cx, cy, color):
                                  br, bg, bb, 1.0, uni(0.03, 0.07), randi(3, 7)])
 
 def spawn_explosion(cx, cy):
+    if not fx_enabled: return
     free_slots = MAX_EXPLOSION_PARTICLES - len(explosion_particles)
     if free_slots <= 0:
         return
@@ -3560,7 +3589,7 @@ class Mode3DEffect:
 
 def update_mode3d(dt, now):
     if mode3d_effect:
-        mode3d_effect.update(dt)
+        mode3d_effect.update(dt)   # always run for income, even if visuals hidden
 
 def draw_mode3d_pre(surface):
     return surface
@@ -3568,6 +3597,51 @@ def draw_mode3d_pre(surface):
 def draw_mode3d_post(surface):
     if mode3d_active and mode3d_effect:
         mode3d_effect.draw(surface)
+
+
+def _apply_upgrade_disabled(bouncer, act, disabled):
+    """Toggle visual effects only — income always continues regardless."""
+    global mode3d_active, mode3d_effect
+    if act == "wave":
+        bouncer.waves_enabled = not disabled
+    elif act == "laser":
+        bouncer.laser_enabled = not disabled
+        if disabled:
+            laser_beams.clear()
+    elif act == "flash":
+        bouncer.flashing = not disabled
+    elif act == "trail":
+        bouncer.trail_enabled = not disabled
+        if disabled: bouncer.trail_points.clear()
+    elif act == "implosion":
+        bouncer.implosion_enabled = not disabled
+        for eff in implosion_effects:
+            if eff.owner is bouncer:
+                if disabled:
+                    eff.phase = IMP_IDLE
+    elif act == "lightning":
+        bouncer.lightning_enabled = not disabled
+        if disabled:
+            lightning_sessions.clear()
+    elif act == "illuminate":
+        bouncer.illuminate_enabled = not disabled
+    elif act == "gravity":
+        bouncer.gravity_enabled = not disabled
+    elif act == "mode3d":
+        bouncer.mode3d_enabled = not disabled
+        if disabled:
+            if not any(b.mode3d_enabled for b in bouncers):
+                mode3d_active = False   # hide visuals; effect object kept for income
+        else:
+            mode3d_active = True
+            if mode3d_effect is None:
+                mode3d_effect = Mode3DEffect()
+    elif act == "factory":
+        pass   # draw gated by shop_data "disabled" flag; income always runs
+    elif act == "donut":
+        bouncer.donut_enabled = not disabled
+    elif act == "goongod":
+        bouncer.goon_god_enabled = not disabled
 
 def select_bouncer(idx):
     global selected_index
@@ -3671,7 +3745,7 @@ class Bouncer:
         return self.shop_data[index-1]["bought"] >= 3
 
     def _spawn_wave(self, side):
-        if len(wave_rings) < 12:
+        if len(wave_rings) < 8:
             wc = (100, 255, 170) if goon_mode else self.color
             wave_rings.append(WaveRing(self.rect.centerx, self.rect.centery, wc, side,
                                        payout=300 * self.earnings_multiplier()))
@@ -3715,8 +3789,9 @@ class Bouncer:
         trail_income_eff = self.trail_income + dp * 5
         coin_bonus_eff = self.coin_bonus + dp
         wave_income_eff = self.wave_income + dp * 100
-        donut_income_eff = DONUT_INCOME_PER_SEC * self.donut_ring_count if self.donut_enabled else 0
-        god_income_eff = DONUT_INCOME_PER_SEC * 15 * self.goon_god_purchases if self.goon_god_enabled else 0
+        # Donut/GoonGod income always runs based on purchases, not enabled flag
+        donut_income_eff = DONUT_INCOME_PER_SEC * self.donut_ring_count if self.donut_ring_count > 0 else 0
+        god_income_eff = DONUT_INCOME_PER_SEC * 15 * self.goon_god_purchases if self.goon_god_purchases > 0 else 0
 
         if donut_income_eff > 0 and now - self.last_donut_income >= 1000:
             ticks = (now - self.last_donut_income) // 1000
@@ -3728,11 +3803,13 @@ class Bouncer:
             self.last_god_income += ticks * 1000
 
         if self.implosion_frozen:
-            if flash_enabled_eff and now >= self.next_flash:
+            # Income runs from purchases regardless of visual toggle
+            if (self.flash_purchases > 0 or dp > 0) and now >= self.next_flash:
                 coins += flash_amount_eff * mul
                 self.next_flash = now + self.flash_interval
-                spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
-            if trail_enabled_eff and now - self.last_trail_income >= 1000:
+                if self.flashing:  # visual only when ON
+                    spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
+            if (self.trail_income > 0 or dp > 0) and now - self.last_trail_income >= 1000:
                 ticks = (now - self.last_trail_income) // 1000
                 coins += trail_income_eff * mul * ticks
                 self.last_trail_income += ticks * 1000
@@ -3773,12 +3850,18 @@ class Bouncer:
             if wave_enabled_eff: self._spawn_wave(side)
             if lightning_power_eff > 0:
                 payout = LIGHTNING_PAYOUT * lightning_power_eff * mul
-                if len(lightning_sessions) < 5:
-                    lightning_sessions.append(LightningSession(self, payout))
+                if self.lightning_enabled:
+                    if len(lightning_sessions) < 5:
+                        lightning_sessions.append(LightningSession(self, payout))
+                else:
+                    coins += payout   # visual off but income still awarded
             if laser_power_eff > 0:
                 beams_before = len(laser_beams)
-                self._emit_lasers(side, dp)
-                coins += (len(laser_beams) - beams_before) * 2000 * mul
+                if self.laser_enabled:
+                    self._emit_lasers(side, dp)
+                    coins += (len(laser_beams) - beams_before) * 2000 * mul
+                else:
+                    coins += laser_power_eff * 2000 * mul   # visual off but income still awarded
 
         for other in bouncers:
             if other is self or other.implosion_frozen: continue
@@ -3807,21 +3890,26 @@ class Bouncer:
             self.draw_rect.x  = round(self.fx);  self.draw_rect.y  = round(self.fy)
             other.draw_rect.x = round(other.fx); other.draw_rect.y = round(other.fy)
 
-        if flash_enabled_eff and now >= self.next_flash:
+        # Flash income: runs whenever flash is purchased (regardless of visual toggle)
+        flash_has_purchases = self.flash_purchases > 0 or dp > 0
+        if flash_has_purchases and now >= self.next_flash:
             coins += flash_amount_eff * mul
             self.next_flash = now + self.flash_interval
-            spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
+            if self.flashing:   # only spawn visual particles when ON
+                spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
 
+        # Trail income: runs whenever trail is purchased (regardless of visual toggle)
+        trail_has_purchases = self.trail_income > 0 or dp > 0
         if trail_enabled_eff:
             # Store center position every frame; keep 60 points for longer ribbon
             cx_t = self.rect.centerx; cy_t = self.rect.centery
             if not self.trail_points or self.trail_points[-1] != (cx_t, cy_t):
                 self.trail_points.append((cx_t, cy_t))
             if len(self.trail_points) > 60: self.trail_points.pop(0)
-            if now - self.last_trail_income >= 1000:
-                ticks = (now - self.last_trail_income) // 1000
-                coins += trail_income_eff * mul * ticks
-                self.last_trail_income += ticks * 1000
+        if trail_has_purchases and now - self.last_trail_income >= 1000:
+            ticks = (now - self.last_trail_income) // 1000
+            coins += trail_income_eff * mul * ticks
+            self.last_trail_income += ticks * 1000
 
     def draw(self, surface):
         if self.implosion_frozen and self.implosion_enabled:
@@ -4154,32 +4242,83 @@ _nw_bo_col = (140, 100, 220)   # changes on bounce
 NW_GAME_W  = GAME_WIDTH        # exact match – same split as main world
 
 # ── Shop data (mirrors main-world structure) ─────────────────────────────
-NW_SHOP_THEME = {
-    "nw_speed": ((40, 40, 52), (120, 200, 255)),
-    "nw_size":  ((38, 52, 38), (100, 220, 120)),
-}
-NW_SHOP_ITEMS = [
-    {"name": "Speed +5%", "base_price": 5,  "action": "nw_speed"},
-    {"name": "Size  +5%", "base_price": 8,  "action": "nw_size"},
+# ── NW Shop: 2 tracks × 20 tiers, unlock previous×3 to open next ──────────
+NW_SHOP_MAX = 20          # max purchases per track
+NW_UNLOCK_THRESH = 3      # buys of tier N needed to unlock tier N+1
+
+NW_SHOP_TRACKS = [
+    {"action": "nw_speed", "name": "SPEED",
+     "accent": (120, 200, 255), "bg": (30, 35, 52),
+     "desc": "+5% bouncer speed"},
+    {"action": "nw_size",  "name": "SIZE",
+     "accent": (100, 220, 120), "bg": (28, 44, 30),
+     "desc": "+5% bouncer size"},
 ]
-_nw_shop_bought = {"nw_speed": 0, "nw_size": 0}
+
+# bought[action] = total purchases on that track (0-20)
+_nw_shop_bought  = {"nw_speed": 0, "nw_size": 0}
+# disabled[action] = True means visual effect toggled off
+_nw_effect_off   = {"nw_speed": False, "nw_size": False}
+
+def _nw_apply_bonuses():
+    """Apply current NW speed/size bonuses to all main-world bouncers.
+    Called after toggle changes or after returning from NW.
+    Stores original values on first call so we can undo them."""
+    spd_mult = (1.05 ** _nw_shop_bought["nw_speed"]) if not _nw_effect_off["nw_speed"] else 1.0
+    siz_mult = (1.05 ** _nw_shop_bought["nw_size"])  if not _nw_effect_off["nw_size"]  else 1.0
+    for b in bouncers:
+        if not hasattr(b, "_nw_base_speed"):
+            b._nw_base_speed = math.hypot(b.speed_x, b.speed_y)
+        if not hasattr(b, "_nw_base_size"):
+            b._nw_base_size = b.BASE_SIZE
+        # Recompute speed from base * multiplier
+        cur_spd = math.hypot(b.speed_x, b.speed_y)
+        if cur_spd > 0:
+            sx_dir = b.speed_x / cur_spd
+            sy_dir = b.speed_y / cur_spd
+        else:
+            sx_dir, sy_dir = 1.0, 0.0
+        new_spd = b._nw_base_speed * spd_mult
+        b.speed_x = sx_dir * new_spd
+        b.speed_y = sy_dir * new_spd
+        # Recompute size from base * multiplier
+        new_size = max(20, int(b._nw_base_size * siz_mult))
+        b.size = new_size
+        b.rect.width = b.rect.height = new_size
+        b.draw_rect.width = b.draw_rect.height = new_size
 
 # ── all-goons toggle for NW shop ─────────────────────────────────────────
 _nw_all_goons = False
 
+def _nw_tier_price(action, tier):
+    """Price to buy tier (0-indexed). Scales 1.3^tier."""
+    bases = {"nw_speed": 5, "nw_size": 8}
+    return max(1, math.ceil(bases[action] * (1.3 ** tier)))
+
 def _nw_shop_price(action):
+    """Price of next purchase on this track."""
+    return _nw_tier_price(action, _nw_shop_bought[action])
+
+def _nw_tier_unlocked(action):
+    """How many tiers are currently unlocked (1-based, min 1)."""
+    # tier 0 always unlocked; tier k unlocked when bought[action] >= k*NW_UNLOCK_THRESH
+    return min(NW_SHOP_MAX, 1 + _nw_shop_bought[action] // NW_UNLOCK_THRESH)
+
+def _nw_can_buy(action):
     b = _nw_shop_bought[action]
-    base = next(i["base_price"] for i in NW_SHOP_ITEMS if i["action"] == action)
-    return math.ceil(base * (1.25 ** b))
+    if b >= NW_SHOP_MAX: return False
+    return True
 
 def _nw_shop_item_rects(W, H):
-    """Return [(Rect, item_dict), ...] for click hit-testing."""
+    """Return [(buy_rect, toggle_rect, track_dict), ...] for click hit-testing."""
     SP_X = NW_GAME_W;  SP_W = W - NW_GAME_W
     ROW_H = SHOP_ROW_H;  ROW_G = SHOP_ROW_GAP;  TOP = SHOP_PANEL_TOP
     out = []
-    for i, item in enumerate(NW_SHOP_ITEMS):
+    for i, trk in enumerate(NW_SHOP_TRACKS):
         ry = int(TOP + i * (ROW_H + ROW_G))
-        out.append((pygame.Rect(SP_X + 10, ry, SP_W - 20, ROW_H), item))
+        buy_rect    = pygame.Rect(SP_X + 10, ry, SP_W - 58, ROW_H)
+        toggle_rect = pygame.Rect(SP_X + SP_W - 50, ry + (ROW_H - 32) // 2, 38, 32)
+        out.append((buy_rect, toggle_rect, trk))
     return out
 
 def _nw_nav_rects(W):
@@ -4484,75 +4623,115 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None, mx=0, my=0):
     lbl_s=lbl_f.render(label,True,lbl_col)
     surf.blit(lbl_s,lbl_s.get_rect(center=(tab_r.centerx-12,tab_r.centery)))
 
-    shop_t=t
+    shop_t = t
+    fn_sm  = pygame.font.SysFont(None, 22)
+    fn_mid = pygame.font.SysFont(None, 26)
+    fn_tiny= pygame.font.SysFont(None, 19)
+
     # ── Shop item rows ───────────────────────────────────────────────────
-    for i,item in enumerate(NW_SHOP_ITEMS):
-        act=item["action"]
-        theme=NW_SHOP_THEME.get(act,((50,50,50),(200,200,200)))
-        bg_col,accent_col=theme[0],theme[1]
-        price=_nw_shop_price(act)
-        bought=_nw_shop_bought[act]
-        can=(green_coins>=price)
-        # in ALL mode tint gold like main shop
-        if _nw_all_goons and len(bouncers)>1 and can:
-            bg=tuple(min(255,int(c*0.7+g*0.3)) for c,g in zip(bg_col,(40,34,5)))
-        elif can:
-            bg=bg_col
+    for i, trk in enumerate(NW_SHOP_TRACKS):
+        act      = trk["action"]
+        accent   = trk["accent"]
+        bg_base  = trk["bg"]
+        bought   = _nw_shop_bought[act]
+        at_max   = (bought >= NW_SHOP_MAX)
+        price    = _nw_shop_price(act)
+        can_afford = (green_coins >= price) or cheat_mode
+        effect_off = _nw_effect_off[act]
+
+        # Row geometry
+        ry       = int(TOP + i * (ROW_H + ROW_G))
+        buy_w    = SP_W - 58          # leaves 48px for toggle btn
+        row_rect = pygame.Rect(SP_X + 10, ry, buy_w, ROW_H)
+        tog_rect = pygame.Rect(SP_X + SP_W - 50, ry + (ROW_H - 32)//2, 38, 32)
+
+        # ── Row background ───────────────────────────────────────────────
+        if at_max:
+            bg = (28, 28, 32)
+        elif can_afford:
+            bg = bg_base
         else:
-            bg=(30,30,34)
+            bg = (26, 26, 30)
 
-        ry=int(TOP+i*(ROW_H+ROW_G))
-        rect=pygame.Rect(SP_X+10,ry,SP_W-20,ROW_H)
-        pygame.draw.rect(surf,bg,rect,border_radius=7)
+        pygame.draw.rect(surf, bg, row_rect, border_radius=7)
 
-        if can:
-            ba=int(160+80*math.sin(shop_t*2.0+i*0.7))
-            bc2=tuple(min(255,int(c*ba/240)) for c in accent_col)
-            if _nw_all_goons and len(bouncers)>1:
-                bc2=(min(255,bc2[0]+40),min(255,bc2[1]+30),max(0,bc2[2]-20))
-            pygame.draw.rect(surf,bc2,rect,1,border_radius=7)
+        # ── Animated border ──────────────────────────────────────────────
+        if at_max:
+            pygame.draw.rect(surf, (60, 60, 68), row_rect, 1, border_radius=7)
+        elif can_afford:
+            pulse = int(150 + 80 * math.sin(shop_t * 2.2 + i * 0.9))
+            bc    = tuple(min(255, int(c * pulse / 230)) for c in accent)
+            pygame.draw.rect(surf, bc, row_rect, 2, border_radius=7)
         else:
-            pygame.draw.rect(surf,(55,55,60),rect,1,border_radius=7)
+            pygame.draw.rect(surf, (200, 60, 60), row_rect, 1, border_radius=7)
 
-        # Left accent stripe
-        pygame.draw.rect(surf,accent_col if can else (60,60,65),(rect.x,rect.y+5,4,rect.height-10),border_radius=2)
+        # ── Left accent stripe ───────────────────────────────────────────
+        stripe_c = accent if can_afford and not at_max else (55, 55, 62)
+        pygame.draw.rect(surf, stripe_c, (row_rect.x, ry+5, 4, ROW_H-10), border_radius=2)
 
-        # Icon box (same as draw_shop_icon)
-        icon_bg=pygame.Rect(rect.x+8,rect.y+8,40,rect.height-16)
-        pygame.draw.rect(surf,(20,20,24) if can else (35,35,40),icon_bg,border_radius=8)
-        pygame.draw.rect(surf,accent_col if can else (70,70,76),icon_bg,1,border_radius=8)
-        icx,icy=icon_bg.centerx,icon_bg.centery; ic=accent_col if can else (100,100,110)
-        if act=="nw_speed":
-            pts=[(icx-5,icy-10),(icx+1,icy-3),(icx-2,icy-3),(icx+5,icy+10),(icx-1,icy+2),(icx+2,icy+2)]
-            pygame.draw.polygon(surf,ic,pts)
-        elif act=="nw_size":
-            pygame.draw.rect(surf,ic,(icx-8,icy-8,16,16),2,border_radius=2)
+        # ── Icon box ─────────────────────────────────────────────────────
+        icon_bg = pygame.Rect(row_rect.x+8, ry+8, 40, ROW_H-16)
+        ic_bg   = (20, 20, 24) if (can_afford and not at_max) else (36, 36, 40)
+        pygame.draw.rect(surf, ic_bg, icon_bg, border_radius=8)
+        pygame.draw.rect(surf, accent if (can_afford and not at_max) else (65,65,72),
+                         icon_bg, 1, border_radius=8)
+        icx, icy = icon_bg.centerx, icon_bg.centery
+        ic = accent if (can_afford and not at_max) else (85, 85, 95)
+        if act == "nw_speed":
+            pts = [(icx-5,icy-10),(icx+1,icy-3),(icx-2,icy-3),
+                   (icx+5,icy+10),(icx-1,icy+2),(icx+2,icy+2)]
+            pygame.draw.polygon(surf, ic, pts)
+        elif act == "nw_size":
+            pygame.draw.rect(surf, ic, (icx-8, icy-8, 16, 16), 2, border_radius=2)
+
+        # ── Progress bar (tier dots: filled=bought, open=remaining) ──────
+        bar_x = row_rect.x + 56
+        bar_y  = ry + ROW_H - 14
+        dot_r  = 4; dot_gap = 11
+        max_dots = min(NW_SHOP_MAX, 20)
+        for d in range(max_dots):
+            dx = bar_x + d * dot_gap
+            if dx + dot_r > row_rect.right - 10: break
+            filled = (d < bought)
+            # Every NW_UNLOCK_THRESH dots draw a subtle separator line
+            if d > 0 and d % NW_UNLOCK_THRESH == 0:
+                pygame.draw.line(surf, (80,80,90), (dx-3, bar_y-5), (dx-3, bar_y+5), 1)
+            c_dot = accent if filled else (50,50,58)
+            pygame.draw.circle(surf, c_dot, (dx, bar_y), dot_r if filled else dot_r-1,
+                                0 if filled else 1)
+
+        # ── Name + tier label ────────────────────────────────────────────
+        tc = (230,230,235) if (can_afford and not at_max) else (80,80,90)
+        tier_str = f"MAX" if at_max else f"Tier {bought+1}/{NW_SHOP_MAX}"
+        ns = fn_mid.render(f"{trk['name']}  {tier_str}", True, tc)
+        surf.blit(ns, (row_rect.x+56, ry+7))
+
+        # ── Description ──────────────────────────────────────────────────
+        dc = (110, 130, 120) if (can_afford and not at_max) else (58,60,58)
+        ds = fn_tiny.render(trk["desc"], True, dc)
+        surf.blit(ds, (row_rect.x+56, ry+24))
+
+        # ── Price ────────────────────────────────────────────────────────
+        if at_max:
+            pp_surf = fn_sm.render("MAXED", True, (60,200,100))
+            surf.blit(pp_surf, (row_rect.right - pp_surf.get_width() - 8, ry+8))
         else:
-            pygame.draw.circle(surf,ic,(icx,icy),8,2)
+            pp      = fmt_nw_coins(price)
+            pc2     = (80,255,120) if can_afford else (255,60,60)
+            ps_surf = fn_sm.render(pp, True, pc2)
+            surf.blit(ps_surf, (row_rect.right - ps_surf.get_width() - 8, ry+8))
 
-        # Item name + bought count
-        tc=(230,230,235) if can else (90,90,100)
-        if _nw_all_goons and len(bouncers)>1 and can:
-            tc=(255,240,160)
-        name_txt=f"{item['name']} x{bought}"
-        ns=pygame.font.SysFont(None,26).render(name_txt,True,tc)
-        surf.blit(ns,(rect.x+56,rect.y+8))
-
-        # Price — green if can afford, RED if cannot
-        pp=fmt_nw_coins(price)
-        if cheat_mode:
-            pc2=(80,255,120)
-        elif can:
-            pc2=(80,255,120) if not (_nw_all_goons and len(bouncers)>1) else (255,220,60)
-        else:
-            pc2=(255,60,60)   # RED when can't afford
-        ps_surf=pygame.font.SysFont(None,24).render(pp,True,pc2)
-        surf.blit(ps_surf,(rect.right-ps_surf.get_width()-8,rect.y+ROW_H//2+2))
-
-        # Description line
-        desc_map={"nw_speed":"Bouncer goes faster","nw_size":"Bouncer grows bigger"}
-        ds=pygame.font.SysFont(None,20).render(desc_map.get(act,""),True,(120,140,130) if can else (65,70,68))
-        surf.blit(ds,(rect.x+56,rect.y+28))
+        # ── Toggle (disable/enable effect) button — only if bought > 0 ──
+        if bought > 0:
+            tog_bg  = (40,26,26) if effect_off else (26,40,28)
+            tog_bdr = (180,70,70) if effect_off else (70,180,80)
+            tog_hov = tog_rect.collidepoint(mx, my)
+            if tog_hov:
+                tog_bg  = tuple(min(255, c+20) for c in tog_bg)
+            pygame.draw.rect(surf, tog_bg,  tog_rect, border_radius=6)
+            pygame.draw.rect(surf, tog_bdr, tog_rect, 1, border_radius=6)
+            eye_lbl = fn_tiny.render("OFF" if effect_off else "ON", True, tog_bdr)
+            surf.blit(eye_lbl, eye_lbl.get_rect(center=tog_rect.center))
 
     # ── NEW WORLD watermark ──────────────────────────────────────────────
     la2=int((0.16+0.06*math.sin(t*1.5))*255)
@@ -4928,17 +5107,26 @@ async def new_world_cinematic(screen, clock, W, H, font):
                     _nw_all_goons = (not _nw_all_goons) and len(bouncers) > 1
                 else:
                     shop_items = _nw_shop_item_rects(W, H)
-                    for item_rect, item in shop_items:
-                        act = item["action"]
-                        price = _nw_shop_price(act)
-                        if item_rect.collidepoint(mx2, my2):
-                            if green_coins >= price:
-                                green_coins -= price
-                                _nw_shop_bought[act] += 1
-                                if act == "nw_speed":
-                                    _nw_bo_vx *= 1.05; _nw_bo_vy *= 1.05
-                                elif act == "nw_size":
-                                    _nw_bo_r = min(64, int(_nw_bo_r * 1.05))
+                    for buy_rect, tog_rect, trk in shop_items:
+                        act = trk["action"]
+                        # Toggle effect button
+                        if tog_rect.collidepoint(mx2, my2) and _nw_shop_bought[act] > 0:
+                            _nw_effect_off[act] = not _nw_effect_off[act]
+                            _nw_apply_bonuses()
+                            break
+                        # Buy button
+                        if buy_rect.collidepoint(mx2, my2):
+                            bought_now = _nw_shop_bought[act]
+                            if bought_now < NW_SHOP_MAX:
+                                price = _nw_shop_price(act)
+                                if green_coins >= price or cheat_mode:
+                                    if not cheat_mode:
+                                        green_coins -= price
+                                    _nw_shop_bought[act] += 1
+                                    if act == "nw_speed":
+                                        _nw_bo_vx *= 1.05; _nw_bo_vy *= 1.05
+                                    elif act == "nw_size":
+                                        _nw_bo_r = min(120, int(_nw_bo_r * 1.05))
                             break
 
         if not in_bath:
@@ -4997,7 +5185,7 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker
+    global _show_slot_picker, fx_enabled
 
     while True:
         raw_ms = clock.tick(60)
@@ -5159,6 +5347,16 @@ async def main():
                         all_goons_mode = not all_goons_mode
                         shop_scroll_offset = 0.0
                         continue
+                    # FX toggle button (bottom-right of game area)
+                    _fx_btn_w = font.size("FX: OFF")[0] + 16
+                    _fx_btn_rect = pygame.Rect(GAME_WIDTH - _fx_btn_w - 8, HEIGHT - 28, _fx_btn_w, 22)
+                    if _fx_btn_rect.collidepoint(mx, my):
+                        fx_enabled = not fx_enabled
+                        if not fx_enabled:
+                            flash_particles.clear(); explosion_particles.clear()
+                            wave_rings.clear(); laser_beams.clear()
+                            lightning_sessions.clear(); drip_particles.clear()
+                        continue
                     # Determine which shop list to use
                     if all_goons_mode and len(bouncers) > 1:
                         active_shop_items = all_goons_shop_data()
@@ -5174,9 +5372,24 @@ async def main():
                         else:
                             if not selected_bouncer.is_unlocked(i): continue
                         act = item["action"]
+                        # ── Check toggle ON/OFF button click ──────────────────
+                        if act in _TOGGLEABLE_ACTIONS and item["bought"] > 0:
+                            tb_w = TOGGLE_BTN_W; tb_h = TOGGLE_BTN_H
+                            tb_x = row_rect.right - tb_w - 6
+                            tb_y = row_rect.y + (row_rect.height - tb_h) // 2
+                            _tb_rect = pygame.Rect(tb_x, tb_y, tb_w, tb_h)
+                            if _tb_rect.collidepoint(mx, my):
+                                # Toggle disabled flag on all targets
+                                _tgt_list = list(bouncers) if (all_goons_mode and len(bouncers)>1) else [selected_bouncer]
+                                new_state = not item.get("disabled", False)
+                                for _tb in _tgt_list:
+                                    if i < len(_tb.shop_data):
+                                        _tb.shop_data[i]["disabled"] = new_state
+                                        _apply_upgrade_disabled(_tb, act, new_state)
+                                break
                         if act == "size" and item["bought"] >= 25: continue
                         if act == "donut" and total_donut_goons() >= DONUT_GOON_MAX: continue
-                        if act == "bonus" and len(bouncers) >= 20: continue
+                        if act == "bonus" and len(bouncers) >= 30: continue
                         if not cheat_mode and not free_shop and coins < item["price"]: continue
                         if not cheat_mode and not free_shop: coins -= item["price"]
                         click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
@@ -5220,7 +5433,7 @@ async def main():
                             target_b.flash_interval = 5000 // target_b.flash_purchases
                             target_b.color = target_b._random_color()
                           elif act == "bonus":
-                            if len(bouncers) < 20:
+                            if len(bouncers) < 30:
                                 bouncers.append(Bouncer(GAME_WIDTH//3, HEIGHT//3))
                           elif act == "jew":
                             target_b.coin_bonus += 1
@@ -5275,6 +5488,7 @@ async def main():
                             target_b.goon_god_purchases += 1
                           elif act == "newworld":
                             await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                            _nw_apply_bonuses()
 
                     for i, b in enumerate(bouncers):
                         if b.rect.collidepoint(mx, my):
@@ -5305,32 +5519,53 @@ async def main():
                 lightning_sessions[:] = [ls for ls in lightning_sessions if ls.alive]
                 draw_mode3d_post(screen)
             else:
-                for eff in implosion_effects: eff.draw(screen)
                 for b in bouncers: b.draw(screen)
-                for eff in implosion_effects: eff.draw_cooldown_hud(screen)
+                if fx_enabled:
+                    for eff in implosion_effects: eff.draw(screen)
+                    for eff in implosion_effects: eff.draw_cooldown_hud(screen)
 
-                update_draw_particles(flash_particles,     screen, False)
-                update_draw_particles(explosion_particles, screen, True)
+                    update_draw_particles(flash_particles,     screen, False)
+                    update_draw_particles(explosion_particles, screen, True)
+                else:
+                    flash_particles.clear()
+                    explosion_particles.clear()
 
-                for ring in wave_rings:   ring.update(); ring.draw(screen)
+                # Wave rings — update always (income), draw only if fx on
+                for ring in wave_rings:   ring.update()
+                if fx_enabled:
+                    for ring in wave_rings: ring.draw(screen)
                 wave_rings[:]  = [r for r in wave_rings  if r.alive]
 
+                # Laser beams — update always, draw only if fx on
                 for beam in laser_beams:  beam.update()
                 laser_beams[:] = [b for b in laser_beams if b.alive]
                 if len(laser_beams) > LASER_MAX_ACTIVE_BEAMS:
                     del laser_beams[:-LASER_MAX_ACTIVE_BEAMS]
-                for beam in laser_beams:  beam.draw(screen)
+                if fx_enabled:
+                    for beam in laser_beams:  beam.draw(screen)
 
                 update_factories(dt, now_g)
-                draw_factories(screen, now_g)
+                # Hide factories only when every bouncer that owns factory has it disabled
+                _fac_all_off = all(
+                    next((it.get("disabled", False) for it in b.shop_data if it["action"] == "factory"), True)
+                    for b in bouncers if any(it["action"] == "factory" and it["bought"] > 0 for it in b.shop_data)
+                ) if any(it["action"] == "factory" and it["bought"] > 0 for b in bouncers for it in b.shop_data) else False
+                if fx_enabled and not _fac_all_off:
+                    draw_factories(screen, now_g)
 
-                for ls in lightning_sessions: ls.update(); ls.draw(screen)
+                # Lightning — update always (income), draw only if fx on
+                for ls in lightning_sessions: ls.update()
+                if fx_enabled:
+                    for ls in lightning_sessions: ls.draw(screen)
                 lightning_sessions[:] = [ls for ls in lightning_sessions if ls.alive]
 
-                for eff in illuminate_effects: eff.update(); eff.draw(screen)
+                for eff in illuminate_effects: eff.update()
+                if fx_enabled:
+                    for eff in illuminate_effects: eff.draw(screen)
 
                 update_gravity_wells(dt, now_g)
-                draw_gravity_wells(screen, now_g)
+                if fx_enabled:
+                    draw_gravity_wells(screen, now_g)
 
             # ---- SHOP PANEL ----
             # Background gradient: dark left edge, slightly lighter right
@@ -5564,11 +5799,29 @@ async def main():
                 else:
                     pc = (255, 80, 80)
 
+                # ── Toggle ON/OFF button (only for bought toggleable upgrades) ──
+                is_toggleable = act in _TOGGLEABLE_ACTIONS and item["bought"] > 0 and unlocked
+                toggle_btn_rect = None
+                if is_toggleable:
+                    tb_w = TOGGLE_BTN_W; tb_h = TOGGLE_BTN_H
+                    tb_x = rect.right - tb_w - 6
+                    tb_y = rect.y + (rect.height - tb_h) // 2
+                    toggle_btn_rect = pygame.Rect(tb_x, tb_y, tb_w, tb_h)
+                    is_disabled = item.get("disabled", False)
+                    tb_bg  = (45, 35, 35) if is_disabled else (35, 70, 35)
+                    tb_brd = (180, 60, 60) if is_disabled else (60, 200, 80)
+                    tb_lbl = font.render("OFF" if is_disabled else "ON", True,
+                                         (200, 80, 80) if is_disabled else (80, 220, 80))
+                    pygame.draw.rect(screen, tb_bg, toggle_btn_rect, border_radius=5)
+                    pygame.draw.rect(screen, tb_brd, toggle_btn_rect, 1, border_radius=5)
+                    screen.blit(tb_lbl, tb_lbl.get_rect(center=toggle_btn_rect.center))
+
                 # Name left-aligned, price right-aligned
+                price_right = (toggle_btn_rect.x - 4) if toggle_btn_rect else (rect.right - 8)
                 ns = hud_surf(f"n{i}{'A' if all_goons_mode else ''}", np,  font, tc)
                 ps = hud_surf(f"p{i}{'A' if all_goons_mode else ''}", pp,  font, pc)
                 screen.blit(ns, (rect.x + 56, rect.y + 11))
-                screen.blit(ps, (rect.right - ps.get_width() - 8, rect.y + 30))
+                screen.blit(ps, (price_right - ps.get_width(), rect.y + 30))
 
             # Scroll bar
             viewport_h = HEIGHT - SHOP_PANEL_TOP - SHOP_PANEL_BOTTOM_PAD
@@ -5597,6 +5850,16 @@ async def main():
             if goon_mode:
                 screen.blit(hud_surf("goon", "\U0001f4a6 GOON MODE \U0001f4a6", font, (100,255,150)), (20, _hud_y2 if not cheat_mode else _hud_y2+20))
             screen.blit(hud_surf("esc",   "ESC = Menu",             font,     (100,100,100)),(20, HEIGHT-30))
+
+            # ── FX Toggle button ───────────────────────────────────────────────
+            fx_btn_label = "FX: ON" if fx_enabled else "FX: OFF"
+            fx_btn_col   = (40, 160, 80) if fx_enabled else (140, 50, 50)
+            fx_btn_surf  = font.render(fx_btn_label, True, (220, 220, 220))
+            fx_btn_rect  = pygame.Rect(GAME_WIDTH - fx_btn_surf.get_width() - 24, HEIGHT - 28,
+                                       fx_btn_surf.get_width() + 16, 22)
+            pygame.draw.rect(screen, fx_btn_col, fx_btn_rect, border_radius=6)
+            pygame.draw.rect(screen, (200, 200, 200), fx_btn_rect, 1, border_radius=6)
+            screen.blit(fx_btn_surf, (fx_btn_rect.x + 8, fx_btn_rect.y + 3))
 
             pygame.display.flip()
 
@@ -5644,12 +5907,25 @@ med_font   = pygame.font.SysFont(None, 52)
 
 clock = pygame.time.Clock()
 
-# ------------------ HIGH SCORE ------------------
-_BASE_DIR = os.path.dirname(__file__) or "."
+# ------------------ SAVE DIRECTORY (persistent across updates) ------------------
+def _save_dir():
+    """Returns a persistent OS-level folder so saves survive game file updates."""
+    import platform as _plat
+    sys_name = _plat.system()
+    if sys_name == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif sys_name == "Darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+    d = os.path.join(base, "BounceEmpire")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 def rel_path(*parts):
-    return os.path.join(_BASE_DIR, *parts)
+    return os.path.join(_save_dir(), *parts)
 
+# ------------------ HIGH SCORE ------------------
 HIGHSCORE_FILE_NORMAL = rel_path("highscore.txt")
 HIGHSCORE_FILE_GOON   = rel_path("highscore_goon.txt")
 HIGHSCORE_FILE_DEV    = rel_path("highscore_dev.txt")
@@ -5745,6 +6021,12 @@ SHOP_PANEL_TOP   = 42
 SHOP_PANEL_BOTTOM_PAD = 10
 shop_scroll_offset = 0.0
 all_goons_mode = False   # when True, shop shows "upgrade ALL goons at once" tab
+
+# Actions that can be toggled on/off after purchase (visual/effect only, not stat upgrades)
+_TOGGLEABLE_ACTIONS = {"wave","laser","flash","trail","implosion","lightning",
+                       "illuminate","gravity","mode3d","donut","goongod","factory"}
+TOGGLE_BTN_W = 36
+TOGGLE_BTN_H = 20
 
 def shop_item_rect(i, scroll_off=0.0):
     y = int(SHOP_PANEL_TOP + i * (SHOP_ROW_H + SHOP_ROW_GAP) - scroll_off)
@@ -5852,7 +6134,8 @@ def build_shop_data(existing=None):
             "price": old["price"] if old else it["base_price"],
             "base_price": it["base_price"],
             "action": it["action"],
-            "bought": old["bought"] if old else 0
+            "bought": old["bought"] if old else 0,
+            "disabled": old.get("disabled", False) if old else False,
         })
     return rows
 
@@ -5878,6 +6161,7 @@ def update_spawn_drips(now):
 
 def draw_drips(surface):
     if not goon_mode: return
+    if not fx_enabled: return
     i = 0
     while i < len(drip_particles):
         d = drip_particles[i]
@@ -5915,6 +6199,7 @@ _EXP_COLORS = [(255,80,0),(255,160,0),(255,220,0),(255,40,40),(255,0,0)]
 _TWO_PI     = 2.0 * math.pi
 
 def spawn_flash_particles(cx, cy, color):
+    if not fx_enabled: return
     free_slots = MAX_FLASH_PARTICLES - len(flash_particles)
     if free_slots <= 0:
         return
@@ -5929,6 +6214,7 @@ def spawn_flash_particles(cx, cy, color):
                                  br, bg, bb, 1.0, uni(0.03, 0.07), randi(3, 7)])
 
 def spawn_explosion(cx, cy):
+    if not fx_enabled: return
     free_slots = MAX_EXPLOSION_PARTICLES - len(explosion_particles)
     if free_slots <= 0:
         return
@@ -8956,7 +9242,7 @@ class Mode3DEffect:
 
 def update_mode3d(dt, now):
     if mode3d_effect:
-        mode3d_effect.update(dt)
+        mode3d_effect.update(dt)   # always run for income, even if visuals hidden
 
 def draw_mode3d_pre(surface):
     return surface
@@ -8964,6 +9250,51 @@ def draw_mode3d_pre(surface):
 def draw_mode3d_post(surface):
     if mode3d_active and mode3d_effect:
         mode3d_effect.draw(surface)
+
+
+def _apply_upgrade_disabled(bouncer, act, disabled):
+    """Toggle visual effects only — income always continues regardless."""
+    global mode3d_active, mode3d_effect
+    if act == "wave":
+        bouncer.waves_enabled = not disabled
+    elif act == "laser":
+        bouncer.laser_enabled = not disabled
+        if disabled:
+            laser_beams.clear()
+    elif act == "flash":
+        bouncer.flashing = not disabled
+    elif act == "trail":
+        bouncer.trail_enabled = not disabled
+        if disabled: bouncer.trail_points.clear()
+    elif act == "implosion":
+        bouncer.implosion_enabled = not disabled
+        for eff in implosion_effects:
+            if eff.owner is bouncer:
+                if disabled:
+                    eff.phase = IMP_IDLE
+    elif act == "lightning":
+        bouncer.lightning_enabled = not disabled
+        if disabled:
+            lightning_sessions.clear()
+    elif act == "illuminate":
+        bouncer.illuminate_enabled = not disabled
+    elif act == "gravity":
+        bouncer.gravity_enabled = not disabled
+    elif act == "mode3d":
+        bouncer.mode3d_enabled = not disabled
+        if disabled:
+            if not any(b.mode3d_enabled for b in bouncers):
+                mode3d_active = False   # hide visuals; effect object kept for income
+        else:
+            mode3d_active = True
+            if mode3d_effect is None:
+                mode3d_effect = Mode3DEffect()
+    elif act == "factory":
+        pass   # draw gated by shop_data "disabled" flag; income always runs
+    elif act == "donut":
+        bouncer.donut_enabled = not disabled
+    elif act == "goongod":
+        bouncer.goon_god_enabled = not disabled
 
 def select_bouncer(idx):
     global selected_index
@@ -9067,7 +9398,7 @@ class Bouncer:
         return self.shop_data[index-1]["bought"] >= 3
 
     def _spawn_wave(self, side):
-        if len(wave_rings) < 12:
+        if len(wave_rings) < 8:
             wc = (100, 255, 170) if goon_mode else self.color
             wave_rings.append(WaveRing(self.rect.centerx, self.rect.centery, wc, side,
                                        payout=300 * self.earnings_multiplier()))
@@ -9111,8 +9442,9 @@ class Bouncer:
         trail_income_eff = self.trail_income + dp * 5
         coin_bonus_eff = self.coin_bonus + dp
         wave_income_eff = self.wave_income + dp * 100
-        donut_income_eff = DONUT_INCOME_PER_SEC * self.donut_ring_count if self.donut_enabled else 0
-        god_income_eff = DONUT_INCOME_PER_SEC * 15 * self.goon_god_purchases if self.goon_god_enabled else 0
+        # Donut/GoonGod income always runs based on purchases, not enabled flag
+        donut_income_eff = DONUT_INCOME_PER_SEC * self.donut_ring_count if self.donut_ring_count > 0 else 0
+        god_income_eff = DONUT_INCOME_PER_SEC * 15 * self.goon_god_purchases if self.goon_god_purchases > 0 else 0
 
         if donut_income_eff > 0 and now - self.last_donut_income >= 1000:
             ticks = (now - self.last_donut_income) // 1000
@@ -9124,11 +9456,13 @@ class Bouncer:
             self.last_god_income += ticks * 1000
 
         if self.implosion_frozen:
-            if flash_enabled_eff and now >= self.next_flash:
+            # Income runs from purchases regardless of visual toggle
+            if (self.flash_purchases > 0 or dp > 0) and now >= self.next_flash:
                 coins += flash_amount_eff * mul
                 self.next_flash = now + self.flash_interval
-                spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
-            if trail_enabled_eff and now - self.last_trail_income >= 1000:
+                if self.flashing:  # visual only when ON
+                    spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
+            if (self.trail_income > 0 or dp > 0) and now - self.last_trail_income >= 1000:
                 ticks = (now - self.last_trail_income) // 1000
                 coins += trail_income_eff * mul * ticks
                 self.last_trail_income += ticks * 1000
@@ -9169,12 +9503,18 @@ class Bouncer:
             if wave_enabled_eff: self._spawn_wave(side)
             if lightning_power_eff > 0:
                 payout = LIGHTNING_PAYOUT * lightning_power_eff * mul
-                if len(lightning_sessions) < 5:
-                    lightning_sessions.append(LightningSession(self, payout))
+                if self.lightning_enabled:
+                    if len(lightning_sessions) < 5:
+                        lightning_sessions.append(LightningSession(self, payout))
+                else:
+                    coins += payout   # visual off but income still awarded
             if laser_power_eff > 0:
                 beams_before = len(laser_beams)
-                self._emit_lasers(side, dp)
-                coins += (len(laser_beams) - beams_before) * 2000 * mul
+                if self.laser_enabled:
+                    self._emit_lasers(side, dp)
+                    coins += (len(laser_beams) - beams_before) * 2000 * mul
+                else:
+                    coins += laser_power_eff * 2000 * mul   # visual off but income still awarded
 
         for other in bouncers:
             if other is self or other.implosion_frozen: continue
@@ -9203,21 +9543,26 @@ class Bouncer:
             self.draw_rect.x  = round(self.fx);  self.draw_rect.y  = round(self.fy)
             other.draw_rect.x = round(other.fx); other.draw_rect.y = round(other.fy)
 
-        if flash_enabled_eff and now >= self.next_flash:
+        # Flash income: runs whenever flash is purchased (regardless of visual toggle)
+        flash_has_purchases = self.flash_purchases > 0 or dp > 0
+        if flash_has_purchases and now >= self.next_flash:
             coins += flash_amount_eff * mul
             self.next_flash = now + self.flash_interval
-            spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
+            if self.flashing:   # only spawn visual particles when ON
+                spawn_flash_particles(self.rect.centerx, self.rect.centery, self.color)
 
+        # Trail income: runs whenever trail is purchased (regardless of visual toggle)
+        trail_has_purchases = self.trail_income > 0 or dp > 0
         if trail_enabled_eff:
             # Store center position every frame; keep 60 points for longer ribbon
             cx_t = self.rect.centerx; cy_t = self.rect.centery
             if not self.trail_points or self.trail_points[-1] != (cx_t, cy_t):
                 self.trail_points.append((cx_t, cy_t))
             if len(self.trail_points) > 60: self.trail_points.pop(0)
-            if now - self.last_trail_income >= 1000:
-                ticks = (now - self.last_trail_income) // 1000
-                coins += trail_income_eff * mul * ticks
-                self.last_trail_income += ticks * 1000
+        if trail_has_purchases and now - self.last_trail_income >= 1000:
+            ticks = (now - self.last_trail_income) // 1000
+            coins += trail_income_eff * mul * ticks
+            self.last_trail_income += ticks * 1000
 
     def draw(self, surface):
         if self.implosion_frozen and self.implosion_enabled:
@@ -9502,7 +9847,7 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker
+    global _show_slot_picker, fx_enabled
 
     while True:
         raw_ms = clock.tick(60)
@@ -9662,6 +10007,16 @@ async def main():
                         all_goons_mode = not all_goons_mode
                         shop_scroll_offset = 0.0
                         continue
+                    # FX toggle button (bottom-right of game area)
+                    _fx_btn_w = font.size("FX: OFF")[0] + 16
+                    _fx_btn_rect = pygame.Rect(GAME_WIDTH - _fx_btn_w - 8, HEIGHT - 28, _fx_btn_w, 22)
+                    if _fx_btn_rect.collidepoint(mx, my):
+                        fx_enabled = not fx_enabled
+                        if not fx_enabled:
+                            flash_particles.clear(); explosion_particles.clear()
+                            wave_rings.clear(); laser_beams.clear()
+                            lightning_sessions.clear(); drip_particles.clear()
+                        continue
                     # Determine which shop list to use
                     if all_goons_mode and len(bouncers) > 1:
                         active_shop_items = all_goons_shop_data()
@@ -9677,9 +10032,24 @@ async def main():
                         else:
                             if not selected_bouncer.is_unlocked(i): continue
                         act = item["action"]
+                        # ── Check toggle ON/OFF button click ──────────────────
+                        if act in _TOGGLEABLE_ACTIONS and item["bought"] > 0:
+                            tb_w = TOGGLE_BTN_W; tb_h = TOGGLE_BTN_H
+                            tb_x = row_rect.right - tb_w - 6
+                            tb_y = row_rect.y + (row_rect.height - tb_h) // 2
+                            _tb_rect = pygame.Rect(tb_x, tb_y, tb_w, tb_h)
+                            if _tb_rect.collidepoint(mx, my):
+                                # Toggle disabled flag on all targets
+                                _tgt_list = list(bouncers) if (all_goons_mode and len(bouncers)>1) else [selected_bouncer]
+                                new_state = not item.get("disabled", False)
+                                for _tb in _tgt_list:
+                                    if i < len(_tb.shop_data):
+                                        _tb.shop_data[i]["disabled"] = new_state
+                                        _apply_upgrade_disabled(_tb, act, new_state)
+                                break
                         if act == "size" and item["bought"] >= 25: continue
                         if act == "donut" and total_donut_goons() >= DONUT_GOON_MAX: continue
-                        if act == "bonus" and len(bouncers) >= 20: continue
+                        if act == "bonus" and len(bouncers) >= 30: continue
                         if not cheat_mode and not free_shop and coins < item["price"]: continue
                         if not cheat_mode and not free_shop: coins -= item["price"]
                         click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
@@ -9723,7 +10093,7 @@ async def main():
                             target_b.flash_interval = 5000 // target_b.flash_purchases
                             target_b.color = target_b._random_color()
                           elif act == "bonus":
-                            if len(bouncers) < 20:
+                            if len(bouncers) < 30:
                                 bouncers.append(Bouncer(GAME_WIDTH//3, HEIGHT//3))
                           elif act == "jew":
                             target_b.coin_bonus += 1
@@ -9778,6 +10148,7 @@ async def main():
                             target_b.goon_god_purchases += 1
                           elif act == "newworld":
                             await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                            _nw_apply_bonuses()
 
                     for i, b in enumerate(bouncers):
                         if b.rect.collidepoint(mx, my):
@@ -9808,32 +10179,53 @@ async def main():
                 lightning_sessions[:] = [ls for ls in lightning_sessions if ls.alive]
                 draw_mode3d_post(screen)
             else:
-                for eff in implosion_effects: eff.draw(screen)
                 for b in bouncers: b.draw(screen)
-                for eff in implosion_effects: eff.draw_cooldown_hud(screen)
+                if fx_enabled:
+                    for eff in implosion_effects: eff.draw(screen)
+                    for eff in implosion_effects: eff.draw_cooldown_hud(screen)
 
-                update_draw_particles(flash_particles,     screen, False)
-                update_draw_particles(explosion_particles, screen, True)
+                    update_draw_particles(flash_particles,     screen, False)
+                    update_draw_particles(explosion_particles, screen, True)
+                else:
+                    flash_particles.clear()
+                    explosion_particles.clear()
 
-                for ring in wave_rings:   ring.update(); ring.draw(screen)
+                # Wave rings — update always (income), draw only if fx on
+                for ring in wave_rings:   ring.update()
+                if fx_enabled:
+                    for ring in wave_rings: ring.draw(screen)
                 wave_rings[:]  = [r for r in wave_rings  if r.alive]
 
+                # Laser beams — update always, draw only if fx on
                 for beam in laser_beams:  beam.update()
                 laser_beams[:] = [b for b in laser_beams if b.alive]
                 if len(laser_beams) > LASER_MAX_ACTIVE_BEAMS:
                     del laser_beams[:-LASER_MAX_ACTIVE_BEAMS]
-                for beam in laser_beams:  beam.draw(screen)
+                if fx_enabled:
+                    for beam in laser_beams:  beam.draw(screen)
 
                 update_factories(dt, now_g)
-                draw_factories(screen, now_g)
+                # Hide factories only when every bouncer that owns factory has it disabled
+                _fac_all_off = all(
+                    next((it.get("disabled", False) for it in b.shop_data if it["action"] == "factory"), True)
+                    for b in bouncers if any(it["action"] == "factory" and it["bought"] > 0 for it in b.shop_data)
+                ) if any(it["action"] == "factory" and it["bought"] > 0 for b in bouncers for it in b.shop_data) else False
+                if fx_enabled and not _fac_all_off:
+                    draw_factories(screen, now_g)
 
-                for ls in lightning_sessions: ls.update(); ls.draw(screen)
+                # Lightning — update always (income), draw only if fx on
+                for ls in lightning_sessions: ls.update()
+                if fx_enabled:
+                    for ls in lightning_sessions: ls.draw(screen)
                 lightning_sessions[:] = [ls for ls in lightning_sessions if ls.alive]
 
-                for eff in illuminate_effects: eff.update(); eff.draw(screen)
+                for eff in illuminate_effects: eff.update()
+                if fx_enabled:
+                    for eff in illuminate_effects: eff.draw(screen)
 
                 update_gravity_wells(dt, now_g)
-                draw_gravity_wells(screen, now_g)
+                if fx_enabled:
+                    draw_gravity_wells(screen, now_g)
 
             # ---- SHOP PANEL ----
             # Background gradient: dark left edge, slightly lighter right
@@ -10059,11 +10451,29 @@ async def main():
                 else:
                     pc = (255, 80, 80)
 
+                # ── Toggle ON/OFF button (only for bought toggleable upgrades) ──
+                is_toggleable = act in _TOGGLEABLE_ACTIONS and item["bought"] > 0 and unlocked
+                toggle_btn_rect = None
+                if is_toggleable:
+                    tb_w = TOGGLE_BTN_W; tb_h = TOGGLE_BTN_H
+                    tb_x = rect.right - tb_w - 6
+                    tb_y = rect.y + (rect.height - tb_h) // 2
+                    toggle_btn_rect = pygame.Rect(tb_x, tb_y, tb_w, tb_h)
+                    is_disabled = item.get("disabled", False)
+                    tb_bg  = (45, 35, 35) if is_disabled else (35, 70, 35)
+                    tb_brd = (180, 60, 60) if is_disabled else (60, 200, 80)
+                    tb_lbl = font.render("OFF" if is_disabled else "ON", True,
+                                         (200, 80, 80) if is_disabled else (80, 220, 80))
+                    pygame.draw.rect(screen, tb_bg, toggle_btn_rect, border_radius=5)
+                    pygame.draw.rect(screen, tb_brd, toggle_btn_rect, 1, border_radius=5)
+                    screen.blit(tb_lbl, tb_lbl.get_rect(center=toggle_btn_rect.center))
+
                 # Name left-aligned, price right-aligned
+                price_right = (toggle_btn_rect.x - 4) if toggle_btn_rect else (rect.right - 8)
                 ns = hud_surf(f"n{i}{'A' if all_goons_mode else ''}", np,  font, tc)
                 ps = hud_surf(f"p{i}{'A' if all_goons_mode else ''}", pp,  font, pc)
                 screen.blit(ns, (rect.x + 56, rect.y + 11))
-                screen.blit(ps, (rect.right - ps.get_width() - 8, rect.y + 30))
+                screen.blit(ps, (price_right - ps.get_width(), rect.y + 30))
 
             # Scroll bar
             viewport_h = HEIGHT - SHOP_PANEL_TOP - SHOP_PANEL_BOTTOM_PAD
@@ -10092,6 +10502,16 @@ async def main():
             if goon_mode:
                 screen.blit(hud_surf("goon", "\U0001f4a6 GOON MODE \U0001f4a6", font, (100,255,150)), (20, _hud_y2 if not cheat_mode else _hud_y2+20))
             screen.blit(hud_surf("esc",   "ESC = Menu",             font,     (100,100,100)),(20, HEIGHT-30))
+
+            # ── FX Toggle button ───────────────────────────────────────────────
+            fx_btn_label = "FX: ON" if fx_enabled else "FX: OFF"
+            fx_btn_col   = (40, 160, 80) if fx_enabled else (140, 50, 50)
+            fx_btn_surf  = font.render(fx_btn_label, True, (220, 220, 220))
+            fx_btn_rect  = pygame.Rect(GAME_WIDTH - fx_btn_surf.get_width() - 24, HEIGHT - 28,
+                                       fx_btn_surf.get_width() + 16, 22)
+            pygame.draw.rect(screen, fx_btn_col, fx_btn_rect, border_radius=6)
+            pygame.draw.rect(screen, (200, 200, 200), fx_btn_rect, 1, border_radius=6)
+            screen.blit(fx_btn_surf, (fx_btn_rect.x + 8, fx_btn_rect.y + 3))
 
             pygame.display.flip()
 
