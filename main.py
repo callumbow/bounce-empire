@@ -308,6 +308,7 @@ goon_mode      = False
 code_input     = ""
 code_message   = ""
 code_msg_timer = 0
+pending_new_world = False
 # Save/slot picker globals (defined early so both async main copies can use them)
 _show_slot_picker  = False
 _current_save_slot = None
@@ -3740,6 +3741,8 @@ class Bouncer:
     def is_unlocked(self, index):
         if cheat_mode or index == 0: return True
         action = self.shop_data[index]["action"]
+        if action == "newworld":
+            return self.bought_count("goongod") >= 1
         if action in ("bonus", "wave"):
             return self.bought_count("trail") >= 3
         return self.shop_data[index-1]["bought"] >= 3
@@ -4350,6 +4353,24 @@ def _nw_update_bouncer(dt, floor_y, W, H):
         _nw_bo_col = (random.randint(80, 255), random.randint(80, 255), random.randint(80, 255))
     return int(_nw_bo_x), int(_nw_bo_y), hit
 
+_nw_font_cache = {}
+def _nw_sysfont(name, size, bold=False):
+    key = (name, size, bold, _is_web())
+    cached = _nw_font_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        if _is_web():
+            f = pygame.font.SysFont(None, size, bold=bold)
+        else:
+            f = pygame.font.SysFont(name, size, bold=bold)
+            if f is None:
+                f = pygame.font.SysFont(None, size, bold=bold)
+    except Exception:
+        f = pygame.font.SysFont(None, size, bold=bold)
+    _nw_font_cache[key] = f
+    return f
+
 
 def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None, mx=0, my=0):
     """Draw the bathroom world.  mx/my = mouse pos for hover effects."""
@@ -4735,7 +4756,7 @@ def _nw_draw_bathroom(surf, W, H, t, nw_bounce_particles=None, mx=0, my=0):
 
     # ── NEW WORLD watermark ──────────────────────────────────────────────
     la2=int((0.16+0.06*math.sin(t*1.5))*255)
-    fn_nw=pygame.font.SysFont("Georgia",54,bold=True)
+    fn_nw=_nw_sysfont("Georgia",54,bold=True)
     lb_nw=fn_nw.render("NEW WORLD",True,(255,255,255))
     lb_nw.set_alpha(la2)
     surf.blit(lb_nw,lb_nw.get_rect(center=(NW_GAME_W//2,H-30)))
@@ -4836,7 +4857,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
             bs.fill((10,12,40,int(230*shrink))); surf.blit(bs,(bx,by))
             pygame.draw.rect(surf,(int(80*shrink),int(100*shrink),int(220*shrink)),(bx,by,bw,bh),max(1,int(2*shrink)))
             if bw>80:
-                fn2=pygame.font.SysFont("Courier New",max(10,int(22*shrink)),bold=True)
+                fn2=_nw_sysfont("Courier New",max(10,int(22*shrink)),bold=True)
                 t2=fn2.render("BOUNCE EMPIRE",True,(int(128*shrink),int(160*shrink),255))
                 t2.set_alpha(int(shrink*255)); surf.blit(t2,t2.get_rect(center=(W//2,H//2)))
         if fv>0.01:
@@ -5018,7 +5039,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
         # ── 5. Text reveal ───────────────────────────────────────────────
         txt_prog = _nw_clamp((prog - 0.85) / 0.12, 0, 1)
         if txt_prog > 0.02:
-            fn_mono = pygame.font.SysFont("Courier New", 15, bold=True)
+            fn_mono = _nw_sysfont("Courier New", 15, bold=True)
             lines_txt = ["ANOMALOUS SIGNAL DETECTED", "PULSAR CLASS: MAGNETAR",
                          "DESIGNATION: NW-001"]
             for li, ln_txt in enumerate(lines_txt):
@@ -5185,7 +5206,7 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker, fx_enabled
+    global _show_slot_picker, fx_enabled, pending_new_world
 
     while True:
         raw_ms = clock.tick(60)
@@ -5393,6 +5414,8 @@ async def main():
                         if not cheat_mode and not free_shop and coins < item["price"]: continue
                         if not cheat_mode and not free_shop: coins -= item["price"]
                         click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
+                        if act == "newworld":
+                            pending_new_world = True
 
                         if all_goons_mode and len(bouncers) > 1:
                             # Apply upgrade to ALL bouncers
@@ -5486,13 +5509,15 @@ async def main():
                           elif act == "goongod":
                             target_b.goon_god_enabled = True
                             target_b.goon_god_purchases += 1
-                          elif act == "newworld":
-                            await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
-                            _nw_apply_bonuses()
 
                     for i, b in enumerate(bouncers):
                         if b.rect.collidepoint(mx, my):
                             select_bouncer(i)
+
+            if pending_new_world:
+                pending_new_world = False
+                await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                _nw_apply_bonuses()
 
             update_highscore()
             if cheat_mode: coins = DEV_COINS
@@ -5968,6 +5993,7 @@ goon_mode      = False
 code_input     = ""
 code_message   = ""
 code_msg_timer = 0
+pending_new_world = False
 
 DEV_COINS = 10 ** 18
 
@@ -9395,6 +9421,8 @@ class Bouncer:
     def is_unlocked(self, index):
         if cheat_mode or index == 0: return True
         action = self.shop_data[index]["action"]
+        if action == "newworld":
+            return self.bought_count("goongod") >= 1
         if action in ("bonus", "wave"):
             return self.bought_count("trail") >= 3
         return self.shop_data[index-1]["bought"] >= 3
@@ -9849,7 +9877,7 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker, fx_enabled
+    global _show_slot_picker, fx_enabled, pending_new_world
 
     while True:
         raw_ms = clock.tick(60)
@@ -10055,6 +10083,8 @@ async def main():
                         if not cheat_mode and not free_shop and coins < item["price"]: continue
                         if not cheat_mode and not free_shop: coins -= item["price"]
                         click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
+                        if act == "newworld":
+                            pending_new_world = True
 
                         if all_goons_mode and len(bouncers) > 1:
                             # Apply upgrade to ALL bouncers
@@ -10148,13 +10178,15 @@ async def main():
                           elif act == "goongod":
                             target_b.goon_god_enabled = True
                             target_b.goon_god_purchases += 1
-                          elif act == "newworld":
-                            await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
-                            _nw_apply_bonuses()
 
                     for i, b in enumerate(bouncers):
                         if b.rect.collidepoint(mx, my):
                             select_bouncer(i)
+
+            if pending_new_world:
+                pending_new_world = False
+                await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                _nw_apply_bonuses()
 
             update_highscore()
             if cheat_mode: coins = DEV_COINS
