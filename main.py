@@ -4212,10 +4212,10 @@ def _nw_stars(n, rng, W, H):
     return [{"x": rng()*W, "y": rng()*H, "r": rng()*1.8+0.3,
              "br": rng()*0.7+0.3, "tw": rng()*6} for _ in range(n)]
 
-def _nw_nebula(rng, W, H):
+def _nw_nebula(rng, W, H, n=12):
     return [{"x": rng()*W, "y": rng()*H,
              "rx": rng()*180+80, "ry": rng()*90+40,
-             "hue": rng()*360, "al": rng()*0.08+0.03} for _ in range(12)]
+             "hue": rng()*360, "al": rng()*0.08+0.03} for _ in range(n)]
 
 def _nw_streaks(n, rng, W, H):
     out = []
@@ -4270,12 +4270,21 @@ def _nw_apply_bonuses():
     spd_mult = (1.05 ** _nw_shop_bought["nw_speed"]) if not _nw_effect_off["nw_speed"] else 1.0
     siz_mult = (1.05 ** _nw_shop_bought["nw_size"])  if not _nw_effect_off["nw_size"]  else 1.0
     for b in bouncers:
+        cur_spd = math.hypot(b.speed_x, b.speed_y)
         if not hasattr(b, "_nw_base_speed"):
-            b._nw_base_speed = math.hypot(b.speed_x, b.speed_y)
+            b._nw_base_speed = cur_spd
+        else:
+            exp_spd = b._nw_base_speed * spd_mult
+            if cur_spd > 0 and abs(cur_spd - exp_spd) / max(exp_spd, 1.0) > 0.05:
+                # Sync base when normal upgrades changed speed outside NW.
+                b._nw_base_speed = cur_spd / max(spd_mult, 1e-6)
         if not hasattr(b, "_nw_base_size"):
             b._nw_base_size = b.BASE_SIZE
+        else:
+            exp_sz = max(20, int(b._nw_base_size * siz_mult))
+            if abs(b.size - exp_sz) > 1:
+                b._nw_base_size = max(20, int(b.size / max(siz_mult, 1e-6)))
         # Recompute speed from base * multiplier
-        cur_spd = math.hypot(b.speed_x, b.speed_y)
         if cur_spd > 0:
             sx_dir = b.speed_x / cur_spd
             sy_dir = b.speed_y / cur_spd
@@ -4781,12 +4790,24 @@ async def new_world_cinematic(screen, clock, W, H, font):
     # Phase 1: hyperspace → collapses to single point → darkness
     # Phase 2: pulsar discovered from nothing (NEW - replaces old p2+p3)
     # Phase 3: enter bathroom world           (was p4)
+    web_mode = _is_web()
     PHASE_DUR = [3200, 4200, 5500, 2600]
+    star_count = 280
+    neb_count = 12
+    streak_count = 150
+    disc_count = 200
+    if web_mode:
+        # Lighter, shorter cinematic for web/pygbag.
+        PHASE_DUR = [1400, 1600, 2000, 1000]
+        star_count = 140
+        neb_count = 6
+        streak_count = 80
+        disc_count = 100
 
     ra = _nw_rng(42); rb = _nw_rng(99); rc = _nw_rng(17)
-    stars   = _nw_stars(280, ra, W, H)
-    nebula  = _nw_nebula(rb, W, H)
-    streaks = _nw_streaks(150, rc, W, H)
+    stars   = _nw_stars(star_count, ra, W, H)
+    nebula  = _nw_nebula(rb, W, H, neb_count)
+    streaks = _nw_streaks(streak_count, rc, W, H)
 
     # pre-bake nebula glow surfaces
     neb_surfs = []
@@ -4814,7 +4835,7 @@ async def new_world_cinematic(screen, clock, W, H, font):
          0.3 + _nw_rng(13+i)()*0.8,
          0.4 + _nw_rng(17+i)()*0.6,
          1 + _nw_rng(19+i)()*2]
-        for i in range(200)
+        for i in range(disc_count)
     ]
 
     def draw_stars(surf, bm=1.0, tt=0.0):
@@ -5408,6 +5429,11 @@ async def main():
                                         _tb.shop_data[i]["disabled"] = new_state
                                         _apply_upgrade_disabled(_tb, act, new_state)
                                 break
+                        # New World: allow re-entry without repurchase
+                        if act == "newworld" and item["bought"] > 0:
+                            click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
+                            pending_new_world = True
+                            break
                         if act == "size" and item["bought"] >= 25: continue
                         if act == "donut" and total_donut_goons() >= DONUT_GOON_MAX: continue
                         if act == "bonus" and len(bouncers) >= 30: continue
@@ -5426,9 +5452,13 @@ async def main():
                         for target_b in targets:
                           if i >= len(target_b.shop_data): continue
                           t_item = target_b.shop_data[i]
+                          act = t_item["action"]
+                          if act == "newworld":
+                            if t_item["bought"] == 0:
+                                t_item["bought"] = 1
+                            continue
                           t_item["bought"] += 1
                           target_b.increase_price(t_item)
-                          act = t_item["action"]
                           if act == "speed":
                             speed_item = next(it for it in target_b.shop_data if it["action"]=="speed")
                             if speed_item["bought"] <= 25:
@@ -5516,6 +5546,7 @@ async def main():
 
             if pending_new_world:
                 pending_new_world = False
+                await asyncio.sleep(0)
                 await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
                 _nw_apply_bonuses()
 
@@ -10077,6 +10108,11 @@ async def main():
                                         _tb.shop_data[i]["disabled"] = new_state
                                         _apply_upgrade_disabled(_tb, act, new_state)
                                 break
+                        # New World: allow re-entry without repurchase
+                        if act == "newworld" and item["bought"] > 0:
+                            click_animations.append({"rect": row_rect.copy(), "time": pygame.time.get_ticks()})
+                            pending_new_world = True
+                            break
                         if act == "size" and item["bought"] >= 25: continue
                         if act == "donut" and total_donut_goons() >= DONUT_GOON_MAX: continue
                         if act == "bonus" and len(bouncers) >= 30: continue
@@ -10095,9 +10131,13 @@ async def main():
                         for target_b in targets:
                           if i >= len(target_b.shop_data): continue
                           t_item = target_b.shop_data[i]
+                          act = t_item["action"]
+                          if act == "newworld":
+                            if t_item["bought"] == 0:
+                                t_item["bought"] = 1
+                            continue
                           t_item["bought"] += 1
                           target_b.increase_price(t_item)
-                          act = t_item["action"]
                           if act == "speed":
                             speed_item = next(it for it in target_b.shop_data if it["action"]=="speed")
                             if speed_item["bought"] <= 25:
@@ -10185,6 +10225,7 @@ async def main():
 
             if pending_new_world:
                 pending_new_world = False
+                await asyncio.sleep(0)
                 await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
                 _nw_apply_bonuses()
 
