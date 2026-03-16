@@ -443,7 +443,7 @@ BASE_SHOP = [
     {"name": "3D Mode",                  "base_price": 500000000000000,"action": "mode3d"},
     {"name": "Donut Ring",               "base_price": 15000000000000000,"action": "donut"},
     {"name": "God Goon",                "base_price": 375000000000000000,"action": "goongod"},
-    {"name": "New World",               "base_price": 10000000000000000000,"action": "newworld"},
+    {"name": "New World",               "base_price": 100000000000000000000,"action": "newworld"},
 ]
 
 GOON_SHOP = [
@@ -463,7 +463,7 @@ GOON_SHOP = [
     {"name": "Goon 3D Goon",             "base_price": 500000000000000,"action": "mode3d"},
     {"name": "Donut Goon",               "base_price": 15000000000000000,"action": "donut"},
     {"name": "Goon God Goon",           "base_price": 375000000000000000,"action": "goongod"},
-    {"name": "Goon New World",           "base_price": 10000000000000000000,"action": "newworld"},
+    {"name": "Goon New World",           "base_price": 100000000000000000000,"action": "newworld"},
 ]
 
 def active_shop():
@@ -6098,6 +6098,7 @@ BASE_SHOP = [
     {"name": "3D Mode",                  "base_price": 500000000000000,"action": "mode3d"},
     {"name": "Donut Ring",               "base_price": 15000000000000000,"action": "donut"},
     {"name": "God Goon",                "base_price": 375000000000000000,"action": "goongod"},
+    {"name": "New World",               "base_price": 100000000000000000000,"action": "newworld"},
 ]
 
 GOON_SHOP = [
@@ -6117,6 +6118,7 @@ GOON_SHOP = [
     {"name": "Goon 3D Goon",             "base_price": 500000000000000,"action": "mode3d"},
     {"name": "Donut Goon",               "base_price": 15000000000000000,"action": "donut"},
     {"name": "Goon God Goon",           "base_price": 375000000000000000,"action": "goongod"},
+    {"name": "Goon New World",           "base_price": 100000000000000000000,"action": "newworld"},
 ]
 
 def active_shop():
