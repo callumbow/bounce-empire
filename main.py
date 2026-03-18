@@ -309,6 +309,7 @@ code_input     = ""
 code_message   = ""
 code_msg_timer = 0
 pending_new_world = False
+new_world_task = None
 # Save/slot picker globals (defined early so both async main copies can use them)
 _show_slot_picker  = False
 _current_save_slot = None
@@ -5227,12 +5228,23 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker, fx_enabled, pending_new_world
+    global _show_slot_picker, fx_enabled, pending_new_world, new_world_task
 
     while True:
         raw_ms = clock.tick(60)
         dt     = min(raw_ms / 1000.0, 0.05)
         mx, my = pygame.mouse.get_pos()
+        if new_world_task is not None:
+            if new_world_task.done():
+                try:
+                    new_world_task.result()
+                except Exception:
+                    pass
+                new_world_task = None
+                _nw_apply_bonuses()
+            else:
+                await asyncio.sleep(0)
+                continue
 
         # ========== MENU ==========
         if state == STATE_MENU:
@@ -5544,11 +5556,11 @@ async def main():
                         if b.rect.collidepoint(mx, my):
                             select_bouncer(i)
 
-            if pending_new_world:
+            if pending_new_world and new_world_task is None:
                 pending_new_world = False
-                await asyncio.sleep(0)
-                await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
-                _nw_apply_bonuses()
+                new_world_task = asyncio.create_task(
+                    new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                )
 
             update_highscore()
             if cheat_mode: coins = DEV_COINS
@@ -6025,6 +6037,7 @@ code_input     = ""
 code_message   = ""
 code_msg_timer = 0
 pending_new_world = False
+new_world_task = None
 
 DEV_COINS = 10 ** 18
 
@@ -9908,12 +9921,23 @@ async def main():
     global shop_scroll_offset, selected_index, mode3d_active, mode3d_effect
     global start_coins_override, free_shop, all_goons_mode
     global _current_save_slot, _save_msg, _save_msg_timer
-    global _show_slot_picker, fx_enabled, pending_new_world
+    global _show_slot_picker, fx_enabled, pending_new_world, new_world_task
 
     while True:
         raw_ms = clock.tick(60)
         dt     = min(raw_ms / 1000.0, 0.05)
         mx, my = pygame.mouse.get_pos()
+        if new_world_task is not None:
+            if new_world_task.done():
+                try:
+                    new_world_task.result()
+                except Exception:
+                    pass
+                new_world_task = None
+                _nw_apply_bonuses()
+            else:
+                await asyncio.sleep(0)
+                continue
 
         # ========== MENU ==========
         if state == STATE_MENU:
@@ -10223,11 +10247,11 @@ async def main():
                         if b.rect.collidepoint(mx, my):
                             select_bouncer(i)
 
-            if pending_new_world:
+            if pending_new_world and new_world_task is None:
                 pending_new_world = False
-                await asyncio.sleep(0)
-                await new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
-                _nw_apply_bonuses()
+                new_world_task = asyncio.create_task(
+                    new_world_cinematic(screen, clock, WIDTH, HEIGHT, font)
+                )
 
             update_highscore()
             if cheat_mode: coins = DEV_COINS
